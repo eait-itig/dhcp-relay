@@ -2,7 +2,7 @@
 
 `dhcp-relay` is intended as a replacement for ISC `dhcrelay` and
 specifically it's
-[OpenBSD descendent](https://man.openbsd.org/dhcrelay.8).
+[OpenBSD descendant](https://man.openbsd.org/dhcrelay.8).
 
 The motivation for this was the lack of support in `dhcrelay` for
 interfaces on multiple IP subnets. `dhcrelay` assumed a single
@@ -31,7 +31,7 @@ DHCP protocol.
 - A manpage
 - Support for operating on
   [enc(4)](https://man.openbsd.org/enc.4) interfaces
-- Agent Circuit ID Sub-circuit option handling
+- Agent Circuit ID Sub-option handling
 - Agent Remote ID Sub-option handling
 
 ## To do
