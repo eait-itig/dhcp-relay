@@ -1,11 +1,12 @@
 # `dhcp-relay`
 
 `dhcp-relay` is intended as a replacement for ISC `dhcrelay` and
-specifically it's OpenBSD descendent.
+specifically it's
+[OpenBSD descendent](https://man.openbsd.org/dhcrelay.8).
 
 The motivation for this was the lack of support in `dhcrelay` for
-interfaces with multiple IP subnets. `dhcrelay` assumed a single
-primary address on an interface and would only relay dhcp requests
+interfaces on multiple IP subnets. `dhcrelay` assumed a single
+primary address on an interface and would only relay DHCP requests
 as that one DHCP gateway. `dhcp-relay` is designed to support this,
 but also aims to be a better implementation of this part of the
 DHCP protocol.
@@ -28,12 +29,13 @@ DHCP protocol.
 ## Missing `dhcrelay` features
 
 - A manpage
-- Support for operating on enc(4) interfaces
+- Support for operating on
+  [enc(4)](https://man.openbsd.org/enc.4) interfaces
 - Agent Circuit ID Sub-circuit option handling
 - Agent Remote ID Sub-option handling
 
 ## To do
 
-- All missing `dhcrelay` features
-- Use in a DHCP relay chain
+- Add all missing `dhcrelay` features
+- Support use in a DHCP relay chain
 - Get this into OpenBSD so I can stop using git
