@@ -1,4 +1,4 @@
-# `dhcp-relay`
+# dhcp-relay
 
 `dhcp-relay` is intended as a replacement for ISC `dhcrelay` and
 specifically it's
