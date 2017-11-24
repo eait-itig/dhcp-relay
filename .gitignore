@@ -1,0 +1,4 @@
+obj
+dhcp-relay
+*.o
+*.d
