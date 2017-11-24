@@ -1,4 +1,4 @@
-= `dhcp-relay`
+# `dhcp-relay`
 
 `dhcp-relay` is intended as a replacement for ISC `dhcrelay` and
 specifically it's OpenBSD descendent.
@@ -10,11 +10,11 @@ as that one DHCP gateway. `dhcp-relay` is designed to support this,
 but also aims to be a better implementation of this part of the
 DHCP protocol.
 
-== Usage
+## Usage
 
 `usage: dhcp-relay [-d] -i interface destination ...`
 
-== Improvements over `dhcrelay`
+## Improvements over `dhcrelay`
 
 - `dhcp-relay` supports acting as a DHCP gateway for all the IP
   subnets configured on the specified interface, not just the first
@@ -25,14 +25,14 @@ DHCP protocol.
   packets, eg, DHCP INFORM packets from clients sent directly to their
   server, or packets from other DHCP relays.
 
-== Missing `dhcrelay` features
+## Missing `dhcrelay` features
 
 - A manpage
 - Support for operating on enc(4) interfaces
 - Agent Circuit ID Sub-circuit option handling
 - Agent Remote ID Sub-option handling
 
-== To do
+## To do
 
 - All missing `dhcrelay` features
 - Use in a DHCP relay chain
