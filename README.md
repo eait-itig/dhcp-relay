@@ -28,7 +28,6 @@ DHCP protocol.
 
 ## Missing `dhcrelay` features
 
-- A manpage
 - Support for operating on
   [enc(4)](https://man.openbsd.org/enc.4) interfaces
 - Agent Circuit ID Sub-option handling

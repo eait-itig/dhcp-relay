@@ -1,0 +1,88 @@
+.\"   $OpenBSD: tftpd.8,v 1.5 2015/07/18 05:32:56 mcbride Exp $
+.\" 
+.\" Copyright (c) 2017 The University of Queensland
+.\"
+.\" Permission to use, copy, modify, and distribute this software for any
+.\" purpose with or without fee is hereby granted, provided that the above
+.\" copyright notice and this permission notice appear in all copies.
+.\"
+.\" THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+.\" WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+.\" MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+.\" ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+.\" WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+.\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+.\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+.\"
+.Dd $Mdocdate$
+.Dt DHCP-RELAY 8
+.Os
+.Sh NAME
+.Nm dhcp-relay
+.Nd Dynamic Host Configuration Protocol relay agent
+.Sh SYNOPSIS
+.Nm dhcp-relay
+.Op Fl dv
+.Fl i Ar interface
+.Ar destination ...
+.Sh DESCRIPTION
+.Nm
+is a server which provides support for the relaying of 
+DHCP and BOOTP
+requests from clients to servers.
+.Pp
+.Nm
+listens for requests from DHCP clients on an interface and relays
+them to a list of destination DHCP servers.
+Replies from the DHCP servers are in relayed to clients on the interface.
+.Pp
+.Nm
+acts a relay for a single interface in a system.
+If relaying is neeed on multiple interfaces, multiple instances of
+.Nm
+can be used.
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl d
+Do not daemonize.
+If this option is specified,
+.Nm
+will run in the foreground with verbose logging output to stderr.
+.It Fl i Ar interface
+Bind to the
+.Ar interface
+specified.
+.Nm will relay requests received on this interface to
+the destination DHCP servers.
+.Nm
+currently supports relaying packets for Ethernet interfaces.
+.\" or .Xr carp 4 .
+.It Fl v
+Enable verbose logging.
+If this option is enabled,
+.Nm
+will log information about the packets it relays.
+.It Ar destination ...
+Relay requests from gateways on the network to the list of
+.Ar destination
+DHCP servers.
+.El
+.Sh SEE ALSO
+.Xr dhclient 8 ,
+.Xr dhcpd 8
+.Sh HISTORY
+.Nm
+was written by
+.An David Gwynne Aq Mt dlg@uq.edu.au
+for use in the Faculty of Engineering, Architecture and
+Information Technology at the University of Queensland.
+.Sh BUGS
+.Nm
+does not support:
+.Bl -hyphen -compact
+.It
+use as an intermediate relay in a DHCP relay chain.
+.It
+use as a Layer 3 relay.
+.El
