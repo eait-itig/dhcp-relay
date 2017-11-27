@@ -203,11 +203,13 @@ usage(void)
 {
 	extern char *__progname;
 
-	fprintf(stderr, "usage: %s [-d] -i interface destination ...\n",
+	fprintf(stderr, "usage: %s [-dv] -i interface destination ...\n",
 	    __progname);
 
 	exit(1);
 }
+
+int verbose = 0;
 
 int
 main(int argc, char *argv[])
@@ -222,16 +224,19 @@ main(int argc, char *argv[])
 	struct iface *iface;
 	unsigned int i;
 
-	while ((ch = getopt(argc, argv, "di:")) != -1) {
+	while ((ch = getopt(argc, argv, "di:v")) != -1) {
 		switch (ch) {
 		case 'd':
-			debug = 1;
+			debug = verbose = 1;
 			break;
 		case 'i':
 			if (ifname != NULL)
 				usage();
 
 			ifname = optarg;
+			break;
+		case 'v':
+			verbose = 1;
 			break;
 		default:
 			usage();
@@ -853,9 +858,11 @@ dhcp_relay(struct iface *iface, struct packet_ctx *pc,
 				}
 			}
 
-			linfo("forwarded BOOTREQUEST for " ETHER_FMT
-			    " from %s to %s", ETHER_ARGS(pc->pc_saddr),
-			    gi->gi_name, iface->if_server_names[j]);
+			if (verbose) {
+				linfo("forwarded BOOTREQUEST for " ETHER_FMT
+				    " from %s to %s", ETHER_ARGS(pc->pc_saddr),
+				    gi->gi_name, iface->if_server_names[j]);
+			}
 		}
 	}
 }
@@ -1043,8 +1050,10 @@ srvr_relay(struct iface *iface, struct dhcp_giaddr *gi,
 		return;
 	}
 
-	linfo("forwarded BOOTREPLY for " ETHER_FMT " from %s to %s",
-	    ETHER_ARGS(packet->chaddr), srvr_name, gi->gi_name);
+	if (verbose) {
+		linfo("forwarded BOOTREPLY for " ETHER_FMT " from %s to %s",
+		    ETHER_ARGS(packet->chaddr), srvr_name, gi->gi_name);
+	}
 }
 
 /* daemon(3) clone, intended to be used in a "r"estricted environment */
