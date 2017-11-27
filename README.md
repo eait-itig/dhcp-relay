@@ -13,7 +13,7 @@ DHCP protocol.
 
 ## Usage
 
-`usage: dhcp-relay [-d] -i interface destination ...`
+`usage: dhcp-relay [-vd] -i interface destination ...`
 
 ## Improvements over `dhcrelay`
 
