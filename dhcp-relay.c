@@ -159,16 +159,11 @@ struct iface {
 	uint64_t		 if_udp_cksum;
 	uint64_t		 if_dhcp_len;
 	uint64_t		 if_dhcp_opt_len;
+	uint64_t		 if_dhcp_hlen;
 	uint64_t		 if_dhcp_op;
 	uint64_t		 if_srvr_op;
 	uint64_t		 if_srvr_giaddr;
 	uint64_t		 if_srvr_unknown;
-};
-
-struct packet_ctx {
-	uint8_t			 pc_saddr[CHADDR_SIZE];
-	uint8_t			 pc_daddr[CHADDR_SIZE];
-	uint8_t			 pc_addrlen;
 };
 
 __dead void	 usage(void);
@@ -181,10 +176,8 @@ void		 iface_servers(struct iface *, int, char *[]);
 void		 iface_siginfo(int, short, void *);
 
 void		 dhcp_input(int, short, void *);
-void		 dhcp_pkt_input(struct iface *, struct packet_ctx *,
-		     const uint8_t *, size_t);
-void		 dhcp_relay(struct iface *, struct packet_ctx *,
-		     const void *, size_t);
+void		 dhcp_pkt_input(struct iface *, const uint8_t *, size_t);
+void		 dhcp_relay(struct iface *, const void *, size_t);
 void		 srvr_input(int, short, void *);
 void		 srvr_relay(struct iface *, struct dhcp_giaddr *,
 		     const char *, struct dhcp_packet *, size_t);
@@ -650,7 +643,6 @@ void
 dhcp_input(int fd, short events, void *arg)
 {
 	struct iface *iface = arg;
-	struct packet_ctx pc;
 	struct bpf_hdr hdr;
 	size_t len, bpflen;
 	ssize_t rv;
@@ -697,7 +689,7 @@ dhcp_input(int fd, short events, void *arg)
 		if (hdr.bh_caplen < hdr.bh_datalen)
 			iface->if_bpf_short++;
 		else {
-			dhcp_pkt_input(iface, &pc,
+			dhcp_pkt_input(iface,
 			    buf + hdr.bh_hdrlen, hdr.bh_datalen);
 		}
 
@@ -724,8 +716,7 @@ dhcp_input(int fd, short events, void *arg)
 }
 
 void
-dhcp_pkt_input(struct iface *iface, struct packet_ctx *pc,
-    const uint8_t *pkt, size_t len)
+dhcp_pkt_input(struct iface *iface, const uint8_t *pkt, size_t len)
 {
 	const struct ether_header *eh;
 	struct ip iph;
@@ -795,16 +786,11 @@ dhcp_pkt_input(struct iface *iface, struct packet_ctx *pc,
 	pkt += sizeof(udph);
 	len = udplen - sizeof(udph); /* drop extra bytes */
 
-	memcpy(pc->pc_saddr, eh->ether_shost, ETHER_ADDR_LEN);
-	memcpy(pc->pc_daddr, eh->ether_dhost, ETHER_ADDR_LEN);
-	pc->pc_addrlen = ETHER_ADDR_LEN;
-
-	dhcp_relay(iface, pc, pkt, len);
+	dhcp_relay(iface, pkt, len);
 }
 
 void
-dhcp_relay(struct iface *iface, struct packet_ctx *pc,
-    const void *pkt, size_t len)
+dhcp_relay(struct iface *iface, const void *pkt, size_t len)
 {
 	static struct dhcp_packet *packet = NULL;
 	static size_t pktlen = 0;
@@ -842,6 +828,11 @@ dhcp_relay(struct iface *iface, struct packet_ctx *pc,
 		return;
 	}
 
+	if (packet->hlen != ETHER_ADDR_LEN) {
+		iface->if_dhcp_hlen++;
+		return;
+	}
+
 	if (packet->giaddr.s_addr == htonl(0))
 		giaddr = 1;
 
@@ -868,7 +859,8 @@ dhcp_relay(struct iface *iface, struct packet_ctx *pc,
 
 			if (verbose) {
 				linfo("forwarded BOOTREQUEST for " ETHER_FMT
-				    " from %s to %s", ETHER_ARGS(pc->pc_saddr),
+				    " from %s to %s",
+				    ETHER_ARGS(packet->chaddr),
 				    gi->gi_name, iface->if_server_names[j]);
 			}
 		}
@@ -950,8 +942,9 @@ srvr_input(int fd, short events, void *arg)
 		return;
 	}
 
-	if (packet->hlen > ETHER_ADDR_LEN) {
+	if (packet->hlen != ETHER_ADDR_LEN) {
 		/* nope */
+		iface->if_dhcp_hlen++;
 		return;
 	}
 
