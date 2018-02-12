@@ -100,6 +100,7 @@
 #include <ifaddrs.h>
 #include <netdb.h>
 #include <assert.h>
+#include <stddef.h>
 
 #include "dhcp.h"
 #include "log.h"
@@ -157,6 +158,7 @@ struct iface {
 	uint64_t		 if_udp_len;
 	uint64_t		 if_udp_cksum;
 	uint64_t		 if_dhcp_len;
+	uint64_t		 if_dhcp_opt_len;
 	uint64_t		 if_dhcp_op;
 	uint64_t		 if_srvr_op;
 	uint64_t		 if_srvr_giaddr;
@@ -366,12 +368,12 @@ iface_siginfo(int sig, short events, void *arg)
 	struct iface *iface = arg;
 
 	linfo("bpf_short:%llu ether_len:%llu ip_len:%llu ip_cksum:%llu "
-	    "udp_len:%llu udp_cksum:%llu dhcp_len:%llu dhcp_op:%llu "
-	    "srvr_op:%llu srvr_giaddr:%llu srvr_unknown:%llu",
+	    "udp_len:%llu udp_cksum:%llu dhcp_len:%llu dhcp_opt_len:%llu "
+	    "dhcp_op:%llu srvr_op:%llu srvr_giaddr:%llu srvr_unknown:%llu",
 	    iface->if_bpf_short, iface->if_ether_len,
 	    iface->if_ip_len, iface->if_ip_cksum,
 	    iface->if_udp_len, iface->if_udp_cksum,
-	    iface->if_dhcp_len, iface->if_dhcp_op,
+	    iface->if_dhcp_len, iface->if_dhcp_opt_len, iface->if_dhcp_op,
 	    iface->if_srvr_op, iface->if_srvr_giaddr, iface->if_srvr_unknown);
 }
 
@@ -810,10 +812,16 @@ dhcp_relay(struct iface *iface, struct packet_ctx *pc,
 	unsigned int i, j;
 	int giaddr = 0;
 
-	if (len < BOOTP_MIN_LEN) {
+	/*
+	 * Apple firmware sometimes generates packets without padding the
+	 * options field. Technically not correct, but as long as the
+	 * non-optional fields are there it can work.
+	 */
+	if (len < offsetof(struct dhcp_packet, options)) {
 		iface->if_dhcp_len++;
 		return;
-	}
+	} else if (len < BOOTP_MIN_LEN)
+		iface->if_dhcp_opt_len++;
 
 	if (len > pktlen) {
 		struct dhcp_packet *newpkt;
