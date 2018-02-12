@@ -5,7 +5,7 @@
 PROG=	dhcp-relay
 SRCS=	dhcp-relay.c
 SRCS+=	log.c
-MAN=	
+MAN=	dhcp-relay.8
 
 LDADD=  -levent
 DPADD=  ${LIBEVENT}
