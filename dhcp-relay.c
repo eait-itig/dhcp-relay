@@ -223,7 +223,8 @@ usage(void)
 {
 	extern char *__progname;
 
-	fprintf(stderr, "usage: %s [-dv] -i interface destination ...\n",
+	fprintf(stderr, "usage: %s [-dv] [-C circuit] [-r remote]"
+	    " -i interface destination ...\n",
 	    __progname);
 
 	exit(1);
