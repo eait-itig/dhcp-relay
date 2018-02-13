@@ -110,8 +110,16 @@
 #define DHCP_USER	"_dhcp"
 #define CHADDR_SIZE	16
 
+struct dhcp_opt_header {
+	uint8_t		code;
+	uint8_t		len;
+} __packed;
+
+#define DHCP_MAX_MSG	(DHCP_MTU_MAX -					\
+			    (sizeof(struct ip) + sizeof(struct udphdr)))
+
 #define ETHER_FMT	"%02x:%02x:%02x:%02x:%02x:%02x"
-#define ETHER_ARGS(_e)	(_e)[0], (_e)[1], (_e)[2], (_e)[3], (_e)[4], (_e)[5] 
+#define ETHER_ARGS(_e)	(_e)[0], (_e)[1], (_e)[2], (_e)[3], (_e)[4], (_e)[5]
 
 #define streq(_a, _b)	(strcmp(_a, _b) == 0)
 #ifndef nitems
@@ -144,6 +152,15 @@ struct iface {
 	struct dhcp_giaddr	*if_giaddrs;
 	unsigned int		 if_ngiaddrs;
 
+	uint8_t			*if_rai;
+	unsigned int		 if_railen;
+
+	void			(*if_dhcp_relay)(struct iface *,
+				      struct dhcp_packet *, size_t);
+	void			(*if_srvr_relay)(struct iface *iface,
+				      struct dhcp_giaddr *, const char *,
+				      struct dhcp_packet *, size_t);
+
 	struct event		 if_bpf_ev;
 	uint8_t			*if_bpf_buf;
 	unsigned int		 if_bpf_len;
@@ -171,6 +188,9 @@ int		 rdaemon(int);
 
 struct iface	*iface_get(const char *);
 void		 iface_bpf_open(struct iface *);
+void		 iface_rai_set(struct iface *, const char *, const char *);
+void		 iface_rai_add(struct iface *, uint8_t,  const char *,
+		     const char *);
 int		 iface_cmp(const void *, const void *);
 void		 iface_servers(struct iface *, int, char *[]);
 void		 iface_siginfo(int, short, void *);
@@ -178,7 +198,12 @@ void		 iface_siginfo(int, short, void *);
 void		 dhcp_input(int, short, void *);
 void		 dhcp_pkt_input(struct iface *, const uint8_t *, size_t);
 void		 dhcp_relay(struct iface *, const void *, size_t);
+void		 dhcp_if_relay(struct iface *, struct dhcp_packet *, size_t);
+void		 dhcp_if_relay_rai(struct iface *, struct dhcp_packet *,
+		     size_t);
 void		 srvr_input(int, short, void *);
+void		 srvr_relay_rai(struct iface *, struct dhcp_giaddr *,
+		     const char *, struct dhcp_packet *, size_t);
 void		 srvr_relay(struct iface *, struct dhcp_giaddr *,
 		     const char *, struct dhcp_packet *, size_t);
 
@@ -210,6 +235,8 @@ int
 main(int argc, char *argv[])
 {
 	const char *ifname = NULL;
+	const char *circuit = NULL;
+	const char *remote = NULL;
 	int debug = 0;
 	int ch;
 
@@ -219,8 +246,13 @@ main(int argc, char *argv[])
 	struct iface *iface;
 	unsigned int i;
 
-	while ((ch = getopt(argc, argv, "di:v")) != -1) {
+	while ((ch = getopt(argc, argv, "C:di:R:v")) != -1) {
 		switch (ch) {
+		case 'C':
+			if (circuit != NULL)
+				usage();
+			circuit = optarg;
+			break;
 		case 'd':
 			debug = verbose = 1;
 			break;
@@ -229,6 +261,11 @@ main(int argc, char *argv[])
 				usage();
 
 			ifname = optarg;
+			break;
+		case 'R':
+			if (remote != NULL)
+				usage();
+			remote = optarg;
 			break;
 		case 'v':
 			verbose = 1;
@@ -262,6 +299,7 @@ main(int argc, char *argv[])
 		errx(1, "interface %s no IPv4 addresses", ifname);
 
 	iface_bpf_open(iface);
+	iface_rai_set(iface, circuit, remote);
 
 	iface->if_bpf_buf = malloc(iface->if_bpf_len * 2);
 	if (iface->if_bpf_buf == NULL)
@@ -466,6 +504,9 @@ iface_get(const char *ifname)
 	freeifaddrs(ifas);
 	iface->if_name = ifname;
 
+	iface->if_dhcp_relay = dhcp_if_relay;
+	iface->if_srvr_relay = srvr_relay;
+
 	return (iface);
 }
 
@@ -640,6 +681,62 @@ iface_bpf_open(struct iface *iface)
 }
 
 void
+iface_rai_add(struct iface *iface, uint8_t code, const char *value,
+    const char *name)
+{
+	struct dhcp_opt_header *hdr;
+	size_t vlen, olen, rlen, nlen;
+
+	vlen = strlen(value);
+	olen = sizeof(*hdr) + vlen;
+	if (olen > DHCP_OPTION_MAXLEN)
+		errx(1, "%s: too long", name);
+
+	rlen = iface->if_railen;
+	nlen = rlen + olen;
+	iface->if_rai = realloc(iface->if_rai, nlen);
+	if (iface->if_rai == NULL)
+		err(1, "%s", name);
+
+	hdr = (struct dhcp_opt_header *)(iface->if_rai + rlen);
+	hdr->code = code;
+	hdr->len = olen;
+	memcpy(hdr + 1, value, vlen);
+
+	iface->if_railen = nlen;
+}
+
+void
+iface_rai_set(struct iface *iface, const char *circuit, const char *remote)
+{
+	struct dhcp_opt_header *hdr;
+	size_t len;
+
+	if (circuit == NULL && remote == NULL)
+		return;
+
+	iface->if_rai = NULL;
+	iface->if_railen = sizeof(*hdr);
+
+	if (circuit != NULL)
+		iface_rai_add(iface, RAI_CIRCUIT_ID, circuit, "Circuit ID");
+
+	if (remote != NULL)
+		iface_rai_add(iface, RAI_REMOTE_ID, remote, "Remote ID");
+
+	len = iface->if_railen - sizeof(*hdr);
+	if (len > DHCP_OPTION_MAXLEN)
+		errx(1, "Relay Agent Information: too long");
+
+	hdr = (struct dhcp_opt_header *)iface->if_rai;
+	hdr->code = DHO_RELAY_AGENT_INFORMATION;
+	hdr->len = len;
+
+	iface->if_dhcp_relay = dhcp_if_relay_rai;
+	iface->if_srvr_relay = srvr_relay_rai;
+}
+
+void
 dhcp_input(int fd, short events, void *arg)
 {
 	struct iface *iface = arg;
@@ -792,34 +889,18 @@ dhcp_pkt_input(struct iface *iface, const uint8_t *pkt, size_t len)
 void
 dhcp_relay(struct iface *iface, const void *pkt, size_t len)
 {
-	static struct dhcp_packet *packet = NULL;
-	static size_t pktlen = 0;
-
-	unsigned int i, j;
-	int giaddr = 0;
+	uint8_t buf[DHCP_MAX_MSG];
+	struct dhcp_packet *packet = (struct dhcp_packet *)buf;
+	ssize_t olen;
 
 	/*
 	 * Apple firmware sometimes generates packets without padding the
 	 * options field. Technically not correct, but as long as the
 	 * non-optional fields are there it can work.
 	 */
-	if (len < offsetof(struct dhcp_packet, options)) {
+	if (len < offsetof(struct dhcp_packet, cookie)) {
 		iface->if_dhcp_len++;
 		return;
-	} else if (len < BOOTP_MIN_LEN)
-		iface->if_dhcp_opt_len++;
-
-	if (len > pktlen) {
-		struct dhcp_packet *newpkt;
-
-		newpkt = realloc(packet, len);
-		if (newpkt == NULL) {
-			lwarn("relay alloc");
-			return;
-		}
-
-		packet = newpkt;
-		pktlen = len;
 	}
 
 	memcpy(packet, pkt, len); /* align packet */
@@ -833,14 +914,102 @@ dhcp_relay(struct iface *iface, const void *pkt, size_t len)
 		return;
 	}
 
-	if (packet->giaddr.s_addr == htonl(0))
-		giaddr = 1;
+	if (packet->giaddr.s_addr != htonl(0)) {
+		/* don't support relay chaining yet */
+		return;
+	}
+
+	olen = BOOTP_MIN_LEN - len;
+	if (olen > 0) {
+		iface->if_dhcp_opt_len++;
+		memset(buf + len, 0, olen);
+		len = BOOTP_MIN_LEN;
+	}
+
+	(*iface->if_dhcp_relay)(iface, packet, len);
+}
+
+static size_t
+dhcp_opt_end(const uint8_t *opts, size_t olen, uint8_t match)
+{
+	size_t i = 0;
+	uint8_t len;
+
+	while (i < olen) {
+		uint8_t code = opts[i];
+		if (code == match)
+			return (i);
+
+		switch (opts[i]) {
+		case DHO_PAD:
+			i++;
+			break;
+		case DHO_END:
+			return (0);
+		case DHO_RELAY_AGENT_INFORMATION:
+			/* relay chaining unsupported */
+			return (0);
+		default:
+			i++;
+			if (i >= olen) {
+				/* too short */
+				return (0);
+			}
+			len = opts[i];
+			i += len + 1;
+			break;
+		}
+	}
+
+	return (0);
+}
+
+void
+dhcp_if_relay_rai(struct iface *iface, struct dhcp_packet *packet, size_t len)
+{
+	size_t olen, nlen;
+	uint8_t *opts;
+
+	if (memcmp(packet->cookie, DHCP_OPTIONS_COOKIE,
+	    sizeof(packet->cookie)) != 0) {
+		/* invalid signature */
+		return;
+	}
+
+	opts = (uint8_t *)(packet + 1);
+	olen = dhcp_opt_end(opts, len - sizeof(*packet), DHO_END);
+	if (olen == 0) {
+		/* too short or unsupported opts */
+		return;
+	}
+	len = sizeof(*packet) + olen;
+
+	nlen = len + iface->if_railen;
+	if (nlen >= DHCP_MAX_MSG) {
+		/* not enough space */
+		return;
+	}
+
+	opts += olen;
+	memcpy(opts, iface->if_rai, iface->if_railen);
+	opts += iface->if_railen;
+	*opts = DHO_END;
+
+	if (nlen < BOOTP_MIN_LEN)
+		nlen = BOOTP_MIN_LEN;
+
+	dhcp_if_relay(iface, packet, nlen);
+}
+
+void
+dhcp_if_relay(struct iface *iface, struct dhcp_packet *packet, size_t len)
+{
+	unsigned int i, j;
 
 	for (i = 0; i < iface->if_ngiaddrs; i++) {
 		struct dhcp_giaddr *gi = &iface->if_giaddrs[i];
 
-		if (giaddr)
-			packet->giaddr = gi->gi_sin.sin_addr;
+		packet->giaddr = gi->gi_sin.sin_addr;
 
 		for (j = 0; j < iface->if_nservers; j++) {
 			struct sockaddr_in *sin = &iface->if_servers[j];
@@ -956,7 +1125,53 @@ srvr_input(int fd, short events, void *arg)
 	}
 	s = srvr - iface->if_servers;
 
-	srvr_relay(iface, gi, iface->if_server_names[s], packet, len);
+	(*iface->if_srvr_relay)(iface, gi, iface->if_server_names[s],
+	    packet, len);
+}
+
+void
+srvr_relay_rai(struct iface *iface, struct dhcp_giaddr *gi,
+    const char *srvr_name, struct dhcp_packet *packet, size_t len)
+{
+	size_t olen;
+	ssize_t diff;
+	uint8_t *opts;
+
+	if (memcmp(packet->cookie, DHCP_OPTIONS_COOKIE,
+	    sizeof(packet->cookie)) != 0) {
+		/* invalid signature */
+		return;
+	}
+
+	opts = (uint8_t *)(packet + 1);
+	olen = dhcp_opt_end(opts, len - sizeof(*packet),
+	    DHO_RELAY_AGENT_INFORMATION);
+	if (olen == 0) {
+		/* too short or missing opts */
+		return;
+	}
+
+	if ((len - olen) < iface->if_railen) {
+		/* not enough space */
+		return;
+	}
+
+	opts += olen;
+	if (memcmp(opts, iface->if_rai, iface->if_railen) != 0) {
+		/* option is wrong */
+		return;
+	}
+	*opts = DHO_END;
+
+	len -= iface->if_railen;
+
+	diff = BOOTP_MIN_LEN - len;
+	if (diff > 0) {
+		memset((uint8_t *)packet + len, 0, diff);
+		len = BOOTP_MIN_LEN;
+	}
+
+	srvr_relay(iface, gi, srvr_name, packet, len);
 }
 
 void

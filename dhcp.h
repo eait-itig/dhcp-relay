@@ -54,6 +54,11 @@
 /* The option/sub-option header length. */
 #define DHCP_OPTION_HDR_LEN	2
 
+/* Magic cookie validating dhcp options field (and bootp vendor
+   extensions field). */
+#define DHCP_OPTIONS_COOKIE	"\143\202\123\143"
+#define DHCP_OPTIONS_COOKIE_LEN	4
+
 #define BOOTP_MIN_LEN		300
 
 struct dhcp_packet {
@@ -71,8 +76,9 @@ struct dhcp_packet {
 	unsigned char chaddr[16];	/* Client hardware address */
 	char sname[DHCP_SNAME_LEN];	/* Server name */
 	char file[DHCP_FILE_LEN];	/* Boot filename */
-	unsigned char options[DHCP_OPTION_LEN];
-				/* Optional parameters
+	unsigned char cookie[DHCP_OPTIONS_COOKIE_LEN];
+
+	/* Folowed by optional parameters
 				   (actual length dependent on MTU). */
 };
 
@@ -88,11 +94,6 @@ struct dhcp_packet {
 #define HTYPE_IEEE802		6	/* IEEE 802.2 Token Ring...	*/
 #define HTYPE_FDDI		8	/* FDDI...			*/
 #define HTYPE_IPSEC_TUNNEL	31	/* IPsec Tunnel (RFC3456)	*/
-
-/* Magic cookie validating dhcp options field (and bootp vendor
-   extensions field). */
-#define DHCP_OPTIONS_COOKIE	"\143\202\123\143"
-#define DHCP_OPTIONS_COOKIE_LEN	4
 
 /* DHCP Option codes: */
 

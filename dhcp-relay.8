@@ -23,6 +23,8 @@
 .Sh SYNOPSIS
 .Nm dhcp-relay
 .Op Fl dv
+.Op Fl C Ar Circuit-ID
+.Op Fl R Ar Remote-ID
 .Fl i Ar interface
 .Ar destination ...
 .Sh DESCRIPTION
@@ -49,6 +51,12 @@ Do not daemonize.
 If this option is specified,
 .Nm
 will run in the foreground with verbose logging output to stderr.
+.It Fl C Ar Circuit-ID
+This option specifies the Agent
+.Ar Circuit-ID
+Sub-option in the Relay Agent Information Option DHCP Option that
+.Nm
+will append to relayed packets.
 .It Fl i Ar interface
 Bind to the
 .Ar interface
@@ -58,6 +66,12 @@ the destination DHCP servers.
 .Nm
 currently supports relaying packets for Ethernet interfaces.
 .\" or .Xr carp 4 .
+.It Fl R Ar Remote-ID
+This option specifies the Agent
+.Ar Remote-ID
+Sub-option in the Relay Agent Information Option DHCP Option that
+.Nm
+will append to relayed packets.
 .It Fl v
 Enable verbose logging.
 If this option is enabled,
