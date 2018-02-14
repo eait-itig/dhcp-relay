@@ -152,6 +152,8 @@ struct iface {
 	struct dhcp_giaddr	*if_giaddrs;
 	unsigned int		 if_ngiaddrs;
 
+	uint8_t			 if_hoplim;
+
 	uint8_t			*if_rai;
 	unsigned int		 if_railen;
 
@@ -178,6 +180,7 @@ struct iface {
 	uint64_t		 if_dhcp_opt_len;
 	uint64_t		 if_dhcp_hlen;
 	uint64_t		 if_dhcp_op;
+	uint64_t		 if_dhcp_hops;
 	uint64_t		 if_srvr_op;
 	uint64_t		 if_srvr_giaddr;
 	uint64_t		 if_srvr_unknown;
@@ -223,8 +226,9 @@ usage(void)
 {
 	extern char *__progname;
 
-	fprintf(stderr, "usage: %s [-dv] [-C circuit] [-r remote]"
-	    " -i interface destination ...\n",
+	fprintf(stderr, "usage: %s [-dv] "
+	    "[-C circuit] [-R remote] [-H hoplim] -i interface"
+	    "\t\tdestination ...\n",
 	    __progname);
 
 	exit(1);
@@ -235,10 +239,12 @@ int verbose = 0;
 int
 main(int argc, char *argv[])
 {
+	const char *errstr;
 	const char *ifname = NULL;
 	const char *circuit = NULL;
 	const char *remote = NULL;
 	int debug = 0;
+	int hoplim = -1;
 	int ch;
 
 	struct passwd *pw;
@@ -256,6 +262,13 @@ main(int argc, char *argv[])
 			break;
 		case 'd':
 			debug = verbose = 1;
+			break;
+		case 'H':
+			if (hoplim != -1)
+				usage();
+			hoplim = strtonum(optarg, 1, 16, &errstr);
+			if (errstr != NULL)
+				errx(1, "hop limit: %s", errstr);
 			break;
 		case 'i':
 			if (ifname != NULL)
@@ -298,6 +311,9 @@ main(int argc, char *argv[])
 		errx(1, "Ethernet interface %s not found", ifname);
 	if (iface->if_ngiaddrs == 0)
 		errx(1, "interface %s no IPv4 addresses", ifname);
+
+	if (hoplim != -1)
+		iface->if_hoplim = hoplim;
 
 	iface_bpf_open(iface);
 	iface_rai_set(iface, circuit, remote);
@@ -400,12 +416,14 @@ iface_siginfo(int sig, short events, void *arg)
 	struct iface *iface = arg;
 
 	linfo("bpf_short:%llu ether_len:%llu ip_len:%llu ip_cksum:%llu "
-	    "udp_len:%llu udp_cksum:%llu dhcp_len:%llu dhcp_opt_len:%llu "
-	    "dhcp_op:%llu srvr_op:%llu srvr_giaddr:%llu srvr_unknown:%llu",
+	    "udp_len:%llu udp_cksum:%llu "
+	    "dhcp_len:%llu dhcp_opt_len:%llu dhcp_op:%llu dhcp_hops:%llu "
+	    "srvr_op:%llu srvr_giaddr:%llu srvr_unknown:%llu",
 	    iface->if_bpf_short, iface->if_ether_len,
 	    iface->if_ip_len, iface->if_ip_cksum,
 	    iface->if_udp_len, iface->if_udp_cksum,
 	    iface->if_dhcp_len, iface->if_dhcp_opt_len, iface->if_dhcp_op,
+	    iface->if_dhcp_hops,
 	    iface->if_srvr_op, iface->if_srvr_giaddr, iface->if_srvr_unknown);
 }
 
@@ -504,6 +522,7 @@ iface_get(const char *ifname)
 
 	freeifaddrs(ifas);
 	iface->if_name = ifname;
+	iface->if_hoplim = 16;
 
 	iface->if_dhcp_relay = dhcp_if_relay;
 	iface->if_srvr_relay = srvr_relay;
@@ -893,6 +912,7 @@ dhcp_relay(struct iface *iface, const void *pkt, size_t len)
 	uint8_t buf[DHCP_MAX_MSG];
 	struct dhcp_packet *packet = (struct dhcp_packet *)buf;
 	ssize_t olen;
+	uint8_t hops;
 
 	/*
 	 * Apple firmware sometimes generates packets without padding the
@@ -903,12 +923,23 @@ dhcp_relay(struct iface *iface, const void *pkt, size_t len)
 		iface->if_dhcp_len++;
 		return;
 	}
+	if (len > sizeof(buf)) {
+		iface->if_dhcp_len++;
+		return;
+	}
 
 	memcpy(packet, pkt, len); /* align packet */
 	if (packet->op != BOOTREQUEST) {
 		iface->if_dhcp_op++;
 		return;
 	}
+
+	hops = packet->hops;
+	if (hops > iface->if_hoplim) {
+		iface->if_dhcp_hops++;
+		return;
+	}
+	packet->hops = ++hops;
 
 	if (packet->hlen != ETHER_ADDR_LEN) {
 		iface->if_dhcp_hlen++;
