@@ -1037,11 +1037,15 @@ void
 dhcp_if_relay(struct iface *iface, struct dhcp_packet *packet, size_t len)
 {
 	unsigned int i, j;
+	int giaddr;
+
+	giaddr = packet->giaddr.s_addr == htonl(0);
 
 	for (i = 0; i < iface->if_ngiaddrs; i++) {
 		struct dhcp_giaddr *gi = &iface->if_giaddrs[i];
 
-		packet->giaddr = gi->gi_sin.sin_addr;
+		if (giaddr)
+			packet->giaddr = gi->gi_sin.sin_addr;
 
 		for (j = 0; j < iface->if_nservers; j++) {
 			struct sockaddr_in *sin = &iface->if_servers[j];
