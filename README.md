@@ -30,8 +30,6 @@ DHCP protocol.
 
 - Support for operating on
   [enc(4)](https://man.openbsd.org/enc.4) interfaces
-- Agent Circuit ID Sub-option handling
-- Agent Remote ID Sub-option handling
 
 ## To do
 
