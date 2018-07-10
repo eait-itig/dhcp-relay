@@ -22,7 +22,7 @@
 .Nd Dynamic Host Configuration Protocol relay agent
 .Sh SYNOPSIS
 .Nm dhcp-relay
-.Op Fl dv
+.Op Fl dNv
 .Op Fl H Ar hoplim
 .Op Fl C Ar Circuit-ID
 .Op Fl R Ar Remote-ID
@@ -52,6 +52,8 @@ Do not daemonize.
 If this option is specified,
 .Nm
 will run in the foreground with verbose logging output to stderr.
+.It Fl N
+Filter DHCP NAK responses.
 .It Fl C Ar Circuit-ID
 This option specifies the Agent
 .Ar Circuit-ID

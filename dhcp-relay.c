@@ -141,6 +141,7 @@ struct dhcp_giaddr {
 struct iface {
 	const char		*if_name;
 	unsigned int		 if_index;
+	int			 if_nakfilt;
 
 	struct sockaddr_in	*if_servers;
 	unsigned int		 if_nservers;
@@ -181,6 +182,7 @@ struct iface {
 	uint64_t		 if_dhcp_hlen;
 	uint64_t		 if_dhcp_op;
 	uint64_t		 if_dhcp_hops;
+	uint64_t		 if_dhcp_nakfilt;
 	uint64_t		 if_srvr_op;
 	uint64_t		 if_srvr_giaddr;
 	uint64_t		 if_srvr_unknown;
@@ -243,6 +245,7 @@ main(int argc, char *argv[])
 	const char *ifname = NULL;
 	const char *circuit = NULL;
 	const char *remote = NULL;
+	int nakfilt = 0;
 	int debug = 0;
 	int hoplim = -1;
 	int ch;
@@ -253,7 +256,7 @@ main(int argc, char *argv[])
 	struct iface *iface;
 	unsigned int i;
 
-	while ((ch = getopt(argc, argv, "C:di:R:v")) != -1) {
+	while ((ch = getopt(argc, argv, "C:di:NR:v")) != -1) {
 		switch (ch) {
 		case 'C':
 			if (circuit != NULL)
@@ -275,6 +278,9 @@ main(int argc, char *argv[])
 				usage();
 
 			ifname = optarg;
+			break;
+		case 'N':
+			nakfilt = 1;
 			break;
 		case 'R':
 			if (remote != NULL)
@@ -402,6 +408,8 @@ main(int argc, char *argv[])
 		event_add(&gi->gi_ev, NULL);
 	}
 
+	iface->if_nakfilt = nakfilt;
+
 	signal_set(&iface->if_siginfo, SIGINFO, iface_siginfo, iface);
 	signal_add(&iface->if_siginfo, NULL);
 
@@ -417,13 +425,14 @@ iface_siginfo(int sig, short events, void *arg)
 
 	linfo("bpf_short:%llu ether_len:%llu ip_len:%llu ip_cksum:%llu "
 	    "udp_len:%llu udp_cksum:%llu "
-	    "dhcp_len:%llu dhcp_opt_len:%llu dhcp_op:%llu dhcp_hops:%llu "
+	    "dhcp_len:%llu dhcp_opt_len:%llu dhcp_op:%llu "
+	    "dhcp_hops:%llu dhcp_nakfilt:%llu "
 	    "srvr_op:%llu srvr_giaddr:%llu srvr_unknown:%llu",
 	    iface->if_bpf_short, iface->if_ether_len,
 	    iface->if_ip_len, iface->if_ip_cksum,
 	    iface->if_udp_len, iface->if_udp_cksum,
 	    iface->if_dhcp_len, iface->if_dhcp_opt_len, iface->if_dhcp_op,
-	    iface->if_dhcp_hops,
+	    iface->if_dhcp_hops, iface->if_dhcp_nakfilt,
 	    iface->if_srvr_op, iface->if_srvr_giaddr, iface->if_srvr_unknown);
 }
 
@@ -961,7 +970,7 @@ dhcp_relay(struct iface *iface, const void *pkt, size_t len)
 	(*iface->if_dhcp_relay)(iface, packet, len);
 }
 
-static size_t
+static ssize_t
 dhcp_opt_end(const uint8_t *opts, size_t olen, uint8_t match)
 {
 	size_t i = 0;
@@ -977,15 +986,15 @@ dhcp_opt_end(const uint8_t *opts, size_t olen, uint8_t match)
 			i++;
 			break;
 		case DHO_END:
-			return (0);
+			return (-1);
 		case DHO_RELAY_AGENT_INFORMATION:
 			/* relay chaining unsupported */
-			return (0);
+			return (-1);
 		default:
 			i++;
 			if (i >= olen) {
 				/* too short */
-				return (0);
+				return (-1);
 			}
 			len = opts[i];
 			i += len + 1;
@@ -999,7 +1008,8 @@ dhcp_opt_end(const uint8_t *opts, size_t olen, uint8_t match)
 void
 dhcp_if_relay_rai(struct iface *iface, struct dhcp_packet *packet, size_t len)
 {
-	size_t olen, nlen;
+	ssize_t olen;
+	size_t nlen;
 	uint8_t *opts;
 
 	if (memcmp(packet->cookie, DHCP_OPTIONS_COOKIE,
@@ -1010,7 +1020,7 @@ dhcp_if_relay_rai(struct iface *iface, struct dhcp_packet *packet, size_t len)
 
 	opts = (uint8_t *)(packet + 1);
 	olen = dhcp_opt_end(opts, len - sizeof(*packet), DHO_END);
-	if (olen == 0) {
+	if (olen == -1) {
 		/* too short or unsupported opts */
 		return;
 	}
@@ -1153,6 +1163,51 @@ srvr_input(int fd, short events, void *arg)
 		return;
 	}
 
+	if (iface->if_nakfilt) {
+		uint8_t mlen;
+		uint8_t *opts = (uint8_t *)(packet + 1);
+		ssize_t olen = dhcp_opt_end(opts, len - sizeof(*packet),
+		    DHO_DHCP_MESSAGE_TYPE);
+		if (olen == -1) {
+			/* too short or missing opts */
+			iface->if_dhcp_len++;
+			return;
+		}
+
+		olen++; /* move to the len */
+		if (olen >= len) {
+			/* too short */
+			iface->if_dhcp_len++;
+			return;
+		}
+
+		mlen = opts[olen];
+		if (mlen != 1) {
+			/* unknown message length */
+			iface->if_dhcp_len++;
+			return;
+		}
+
+		olen++; /* move to the value */
+		if (olen >= len) {
+			/* too short */
+			iface->if_dhcp_len++;
+			return;
+		}
+
+		if (opts[olen] == DHCPNAK) {
+			/* filter */
+			iface->if_dhcp_nakfilt++;
+			return;
+		}
+	}
+
+	if (memcmp(packet->cookie, DHCP_OPTIONS_COOKIE,
+	    sizeof(packet->cookie)) != 0) {
+		/* invalid signature */
+		return;
+	}
+
 	srvr = bsearch(&sin, iface->if_servers, iface->if_nservers,
 	    sizeof(*iface->if_servers), iface_cmp);
 	if (srvr == NULL) {
@@ -1169,7 +1224,7 @@ void
 srvr_relay_rai(struct iface *iface, struct dhcp_giaddr *gi,
     const char *srvr_name, struct dhcp_packet *packet, size_t len)
 {
-	size_t olen;
+	ssize_t olen;
 	ssize_t diff;
 	uint8_t *opts;
 
@@ -1182,7 +1237,7 @@ srvr_relay_rai(struct iface *iface, struct dhcp_giaddr *gi,
 	opts = (uint8_t *)(packet + 1);
 	olen = dhcp_opt_end(opts, len - sizeof(*packet),
 	    DHO_RELAY_AGENT_INFORMATION);
-	if (olen == 0) {
+	if (olen == -1) {
 		/* too short or missing opts */
 		return;
 	}
