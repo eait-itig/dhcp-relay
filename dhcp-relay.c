@@ -218,7 +218,7 @@ static uint16_t	 cksum_fini(uint32_t);
 static inline uint32_t
 cksum_word(uint16_t word, uint32_t cksum)
 {
-	return (cksum + word);
+	return (cksum + htons(word));
 }
 
 #define cksum(_b, _l)	cksum_fini(cksum_add((_b), (_l), 0))
@@ -1086,15 +1086,15 @@ static uint32_t
 cksum_add(const void *buf, size_t len, uint32_t sum)
 {
 	const uint16_t *words = buf;
-	size_t nwords = len / sizeof(*words);
-	size_t i;
 
-	for (i = 0; i < nwords; i++)
-		sum += ntohs(words[i]);
+	while (len > 1) {
+		sum += *words++;
+		len -= sizeof(*words);
+	}
 
-	if (len & 1) {
-		const uint8_t *bytes = buf;
-		sum += bytes[len - 1] << 8;
+	if (len == 1) {
+		const uint8_t *bytes = (const uint8_t *)words;
+		sum = cksum_word(*bytes << 8, sum);
 	}
 
 	return (sum);
@@ -1320,7 +1320,7 @@ srvr_relay(struct iface *iface, struct dhcp_giaddr *gi,
 	iph->ip_sum = htons(0);
 	iph->ip_src = gi->gi_sin.sin_addr;
 
-	iph->ip_sum = htons(cksum(iph, sizeof(*iph)));
+	iph->ip_sum = cksum(iph, sizeof(*iph));
 
 	udph->uh_sport = gi->gi_sin.sin_port;
 	udph->uh_dport = htons(CLIENT_PORT);
@@ -1334,7 +1334,7 @@ srvr_relay(struct iface *iface, struct dhcp_giaddr *gi,
 	cksum = cksum_add(udph, sizeof(*udph), cksum);
 	cksum = cksum_add(packet, len, cksum);
 
-	udph->uh_sum = htons(cksum_fini(cksum));
+	udph->uh_sum = cksum_fini(cksum);
 
 	iov[0].iov_base = &eh;
 	iov[0].iov_len = sizeof(eh);
