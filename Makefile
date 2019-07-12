@@ -17,4 +17,7 @@ CFLAGS+=-Wshadow -Wpointer-arith -Wcast-qual
 CFLAGS+=-Wsign-compare
 DEBUG=-g
 
+BINDIR=/opt/local/sbin
+MANDIR=/opt/local/share/man/man
+
 .include <bsd.prog.mk>
