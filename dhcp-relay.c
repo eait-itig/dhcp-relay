@@ -1067,7 +1067,7 @@ dhcp_if_relay(struct iface *iface, struct dhcp_packet *packet, size_t len)
 				case EINTR:
 					break;
 				default:
-					err(1, "%s sendmsg",
+					lerr(1, "%s sendmsg",
 					    inet_ntoa(sin->sin_addr));
 				}
 			}
@@ -1350,7 +1350,7 @@ srvr_relay(struct iface *iface, struct dhcp_giaddr *gi,
 		case EINTR:
 			break;
 		default:
-			err(1, "bpf write");
+			lerr(1, "bpf write");
 		}
 
 		/* oh well */
