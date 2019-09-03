@@ -1125,8 +1125,7 @@ srvr_input(int fd, short events, void *arg)
 	ssize_t len;
 
 	len = recvfrom(fd, buf, sizeof(buf), 0, sin2sa(&sin), &sinlen);
-	switch (len) {
-	case -1:
+	if (len == -1) {
 		switch (errno) {
 		case EAGAIN:
 		case EINTR:
@@ -1135,15 +1134,11 @@ srvr_input(int fd, short events, void *arg)
 			lerr(1, "udp recv");
 		}
 		return;
-	case 0:
-		lerrx(1, "udp has closed?");
-	default:
-		break;
 	}
 
-	if (sinlen < sizeof(sin))
-		return;
 	if (len < BOOTP_MIN_LEN)
+		return;
+	if (sinlen < sizeof(sin))
 		return;
 
 	if (packet->op != BOOTREPLY) {
