@@ -423,12 +423,13 @@ iface_siginfo(int sig, short events, void *arg)
 {
 	struct iface *iface = arg;
 
-	linfo("bpf_short:%llu ether_len:%llu ip_len:%llu ip_cksum:%llu "
+	linfo("iface:%s bpf_short:%llu ether_len:%llu "
+	    "ip_len:%llu ip_cksum:%llu "
 	    "udp_len:%llu udp_cksum:%llu "
 	    "dhcp_len:%llu dhcp_opt_len:%llu dhcp_op:%llu "
 	    "dhcp_hops:%llu dhcp_nakfilt:%llu "
 	    "srvr_op:%llu srvr_giaddr:%llu srvr_unknown:%llu",
-	    iface->if_bpf_short, iface->if_ether_len,
+	    iface->if_name, iface->if_bpf_short, iface->if_ether_len,
 	    iface->if_ip_len, iface->if_ip_cksum,
 	    iface->if_udp_len, iface->if_udp_cksum,
 	    iface->if_dhcp_len, iface->if_dhcp_opt_len, iface->if_dhcp_op,
@@ -1073,10 +1074,11 @@ dhcp_if_relay(struct iface *iface, struct dhcp_packet *packet, size_t len)
 			}
 
 			if (verbose) {
-				linfo("forwarded BOOTREQUEST for " ETHER_FMT
-				    " from %s to %s",
+				linfo("forwarded BOOTREQUEST for "
+				    ETHER_FMT " on %s from %s to %s",
 				    ETHER_ARGS(packet->chaddr),
-				    gi->gi_name, iface->if_server_names[j]);
+				    iface->if_name, gi->gi_name,
+				    iface->if_server_names[j]);
 			}
 		}
 	}
@@ -1353,8 +1355,9 @@ srvr_relay(struct iface *iface, struct dhcp_giaddr *gi,
 	}
 
 	if (verbose) {
-		linfo("forwarded BOOTREPLY for " ETHER_FMT " from %s to %s",
-		    ETHER_ARGS(packet->chaddr), srvr_name, gi->gi_name);
+		linfo("forwarded BOOTREPLY for " ETHER_FMT " on %s"
+		    " from %s to %s", ETHER_ARGS(packet->chaddr),
+		    iface->if_name, srvr_name, gi->gi_name);
 	}
 }
 
