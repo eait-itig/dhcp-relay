@@ -788,8 +788,8 @@ dhcp_input(int fd, short events, void *arg)
 		}
 		return;
 	case 0:
-		lerrx(0, "BPF has closed");
-		return;
+		lerrx(0, "%s BPF has closed", iface->if_name);
+		/* NOTREACHED */
 	default:
 		break;
 	}
@@ -1134,6 +1134,7 @@ srvr_input(int fd, short events, void *arg)
 			break;
 		default:
 			lerr(1, "udp recv");
+			/* NOTREACHED */
 		}
 		return;
 	}
@@ -1348,6 +1349,7 @@ srvr_relay(struct iface *iface, struct dhcp_giaddr *gi,
 			break;
 		default:
 			lerr(1, "bpf write");
+			/* NOTREACHED */
 		}
 
 		/* oh well */
