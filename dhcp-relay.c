@@ -1064,11 +1064,21 @@ dhcp_if_relay(struct iface *iface, struct dhcp_packet *packet, size_t len)
 			if (sendto(EVENT_FD(&gi->gi_ev), packet, len, 0,
 			    sin2sa(sin), sizeof(*sin)) == -1) {
 				switch (errno) {
+				case EACCES:
+				case EHOSTUNREACH:
+				case ENETUNREACH:
+				case EHOSTDOWN:
+				case ENETDOWN:
+					lwarn("%s sendmsg",
+					    inet_ntoa(sin->sin_addr));
+					/* FALLTHROUGH */
+				case ENOBUFS:
 				case EAGAIN:
 				case EINTR:
-					break;
+					/* skip to the next one */
+					continue;
 				default:
-					lerr(1, "%s sendmsg",
+					lerr(1, "%s fatal sendmsg",
 					    inet_ntoa(sin->sin_addr));
 				}
 			}
