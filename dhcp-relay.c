@@ -138,14 +138,18 @@ struct dhcp_giaddr {
 	const char		*gi_name;
 };
 
+struct dhcp_server {
+	struct sockaddr_in	 ds_addr; /* must be first */
+	const char		*ds_name;
+};
+
 struct iface {
 	const char		*if_name;
 	unsigned int		 if_index;
 	int			 if_nakfilt;
 
-	struct sockaddr_in	*if_servers;
+	struct dhcp_server	*if_servers;
 	unsigned int		 if_nservers;
-	const char		**if_server_names;
 
 	uint8_t			 if_hwaddr[16];
 	unsigned int		 if_hwaddrlen;
@@ -230,7 +234,7 @@ usage(void)
 
 	fprintf(stderr, "usage: %s [-dv] "
 	    "[-C circuit] [-R remote] [-H hoplim] -i interface"
-	    "\n    destination ...\n",
+	    "\n    destination ...\n" ,
 	    __progname);
 
 	exit(1);
@@ -367,7 +371,7 @@ main(int argc, char *argv[])
 
 		printf("server address(es):");
 		for (i = 0; i < iface->if_nservers; i++)
-			printf(" %s", iface->if_server_names[i]);
+			printf(" %s", iface->if_servers[i].ds_name);
 		printf("\n");
 
 		printf("BPF buffer length: %d\n", iface->if_bpf_len);
@@ -543,7 +547,9 @@ iface_get(const char *ifname)
 int
 iface_cmp(const void *a, const void *b)
 {
-	const struct sockaddr_in *sina = a, *sinb = b;
+	const struct dhcp_server *dsa = a, *dsb = b;
+	const struct sockaddr_in *sina = &dsa->ds_addr;
+	const struct sockaddr_in *sinb = &dsb->ds_addr;
 	in_addr_t ina = ntohl(sina->sin_addr.s_addr);
 	in_addr_t inb = ntohl(sinb->sin_addr.s_addr);
 
@@ -566,7 +572,6 @@ iface_servers(struct iface *iface, int argc, char *argv[])
 	const char *host;
 	int error;
 	int i;
-	unsigned int s;
 
 	for (i = 0; i < argc; i++) {
 		host = argv[i];
@@ -576,15 +581,13 @@ iface_servers(struct iface *iface, int argc, char *argv[])
 			errx(1, "%s: %s", host, gai_strerror(error));
 
 		for (res = res0; res != NULL; res = res->ai_next) {
-			struct sockaddr_in *servers, *sin;
+			struct dhcp_server *servers, *server;
 			unsigned int o, n;
 
-			if (res->ai_addrlen > sizeof(*sin)) {
+			if (res->ai_addrlen > sizeof(servers->ds_addr)) {
 				/* XXX */
 				continue;
 			}
-
-			sin = sa2sin(res->ai_addr);
 
 			o = iface->if_nservers;
 			n = o + 1;
@@ -594,7 +597,12 @@ iface_servers(struct iface *iface, int argc, char *argv[])
 			if (servers == NULL)
 				err(1, "server alloc");
 
-			servers[o] = *sin;
+			server = &servers[o];
+			server->ds_addr = *sa2sin(res->ai_addr);
+			server->ds_name = strdup(
+			    inet_ntoa(server->ds_addr.sin_addr));
+			if (server->ds_name == NULL)
+				err(1, "server name alloc");
 
 			iface->if_servers = servers;
 			iface->if_nservers = n;
@@ -608,19 +616,6 @@ iface_servers(struct iface *iface, int argc, char *argv[])
 
 	qsort(iface->if_servers, iface->if_nservers,
 	    sizeof(*iface->if_servers), iface_cmp);
-
-	iface->if_server_names = reallocarray(NULL, iface->if_nservers,
-	    sizeof(*iface->if_server_names));
-	if (iface->if_server_names == NULL)
-		err(1, "server name array alloc");
-
-	for (s = 0; s < iface->if_nservers; s++) {
-		struct sockaddr_in *sin = &iface->if_servers[s];
-
-		iface->if_server_names[s] = strdup(inet_ntoa(sin->sin_addr));
-		if (iface->if_server_names[s] == NULL)
-			err(1, "server name alloc");
-	}
 }
 
 /*
@@ -1059,7 +1054,8 @@ dhcp_if_relay(struct iface *iface, struct dhcp_packet *packet, size_t len)
 			packet->giaddr = gi->gi_sin.sin_addr;
 
 		for (j = 0; j < iface->if_nservers; j++) {
-			struct sockaddr_in *sin = &iface->if_servers[j];
+			struct dhcp_server *ds = &iface->if_servers[j];
+			struct sockaddr_in *sin = &ds->ds_addr;
 
 			if (sendto(EVENT_FD(&gi->gi_ev), packet, len, 0,
 			    sin2sa(sin), sizeof(*sin)) == -1) {
@@ -1088,7 +1084,7 @@ dhcp_if_relay(struct iface *iface, struct dhcp_packet *packet, size_t len)
 				    ETHER_FMT " on %s from %s to %s",
 				    ETHER_ARGS(packet->chaddr),
 				    iface->if_name, gi->gi_name,
-				    iface->if_server_names[j]);
+				    ds->ds_name);
 			}
 		}
 	}
@@ -1131,8 +1127,7 @@ srvr_input(int fd, short events, void *arg)
 	uint8_t buf[4096];
 	struct dhcp_packet *packet = (struct dhcp_packet *)buf;
 	struct sockaddr_in sin;
-	struct sockaddr_in *srvr;
-	unsigned int s;
+	struct dhcp_server *ds;
 	socklen_t sinlen = sizeof(sin);
 	ssize_t len;
 
@@ -1216,16 +1211,14 @@ srvr_input(int fd, short events, void *arg)
 		return;
 	}
 
-	srvr = bsearch(&sin, iface->if_servers, iface->if_nservers,
+	ds = bsearch(&sin, iface->if_servers, iface->if_nservers,
 	    sizeof(*iface->if_servers), iface_cmp);
-	if (srvr == NULL) {
+	if (ds == NULL) {
 		iface->if_srvr_unknown++;
 		return;
 	}
-	s = srvr - iface->if_servers;
 
-	(*iface->if_srvr_relay)(iface, gi, iface->if_server_names[s],
-	    packet, len);
+	(*iface->if_srvr_relay)(iface, gi, ds->ds_name, packet, len);
 }
 
 void
