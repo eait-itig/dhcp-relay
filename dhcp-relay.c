@@ -230,7 +230,7 @@ usage(void)
 
 	fprintf(stderr, "usage: %s [-dv] "
 	    "[-C circuit] [-R remote] [-H hoplim] -i interface"
-	    "\t\tdestination ...\n",
+	    "\n    destination ...\n",
 	    __progname);
 
 	exit(1);
