@@ -241,8 +241,8 @@ usage(void)
 	extern char *__progname;
 
 	fprintf(stderr, "usage: %s [-dv] "
-	    "[-C circuit] [-R remote] [-H hoplim] -i interface"
-	    "\n    destination ...\n" ,
+	    "[-C circuit] [-R remote] [-H hoplim] [-h helper]\n"
+	    "    -i interface destination ...\n",
 	    __progname);
 
 	exit(1);
