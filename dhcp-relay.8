@@ -24,6 +24,7 @@
 .Nm dhcp-relay
 .Op Fl dNv
 .Op Fl H Ar hoplim
+.Op Fl h Ar helper
 .Op Fl C Ar Circuit-ID
 .Op Fl R Ar Remote-ID
 .Fl i Ar interface
@@ -69,6 +70,11 @@ will append to relayed packets.
 .It Fl H Ar hoplim
 Set the limit on the relay hops field in DHCP request packets.
 By default the hop limit is 16.
+.It Fl h Ar helper
+Add a helper server address.
+Helper servers can send packets to
+.Nm
+to be relayed to the client network, but will not be sent client requests.
 .It Fl i Ar interface
 Bind to the
 .Ar interface
