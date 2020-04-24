@@ -131,6 +131,12 @@ struct dhcp_opt_header {
 
 struct iface;
 
+struct dhcp_helper {
+	TAILQ_ENTRY(dhcp_helper)	 dh_entry;
+	char				*dh_name;
+};
+TAILQ_HEAD(dhcp_helpers, dhcp_helper);
+
 struct dhcp_giaddr {
 	struct iface		*gi_if;
 	struct sockaddr_in	 gi_sin;
@@ -141,6 +147,7 @@ struct dhcp_giaddr {
 struct dhcp_server {
 	struct sockaddr_in	 ds_addr; /* must be first */
 	const char		*ds_name;
+	unsigned int		 ds_helper;
 };
 
 struct iface {
@@ -202,6 +209,7 @@ void		 iface_rai_add(struct iface *, uint8_t,  const char *,
 		     const char *);
 int		 iface_cmp(const void *, const void *);
 void		 iface_servers(struct iface *, int, char *[]);
+void		 iface_helpers(struct iface *, struct dhcp_helpers *);
 void		 iface_siginfo(int, short, void *);
 
 void		 dhcp_input(int, short, void *);
@@ -252,15 +260,17 @@ main(int argc, char *argv[])
 	int nakfilt = 0;
 	int debug = 0;
 	int hoplim = -1;
+	struct dhcp_helpers helpers = TAILQ_HEAD_INITIALIZER(helpers);
 	int ch;
 
 	struct passwd *pw;
 	int devnull = -1;
 
 	struct iface *iface;
+	struct dhcp_helper *dh;
 	unsigned int i;
 
-	while ((ch = getopt(argc, argv, "C:di:NR:v")) != -1) {
+	while ((ch = getopt(argc, argv, "C:dh:i:NR:v")) != -1) {
 		switch (ch) {
 		case 'C':
 			if (circuit != NULL)
@@ -270,6 +280,16 @@ main(int argc, char *argv[])
 		case 'd':
 			debug = verbose = 1;
 			break;
+		case 'h':
+			dh = malloc(sizeof(*dh));
+			if (dh == NULL)
+				err(1, NULL);
+
+			dh->dh_name = optarg;
+
+			TAILQ_INSERT_TAIL(&helpers, dh, dh_entry);
+			break;
+
 		case 'H':
 			if (hoplim != -1)
 				usage();
@@ -360,6 +380,10 @@ main(int argc, char *argv[])
 	}
 
 	iface_servers(iface, argc, argv);
+	iface_helpers(iface, &helpers);
+
+	qsort(iface->if_servers, iface->if_nservers,
+	    sizeof(*iface->if_servers), iface_cmp);
 
 	if (debug) {
 		printf("interface address(es):");
@@ -370,8 +394,12 @@ main(int argc, char *argv[])
 		printf("\n");
 
 		printf("server address(es):");
-		for (i = 0; i < iface->if_nservers; i++)
-			printf(" %s", iface->if_servers[i].ds_name);
+		for (i = 0; i < iface->if_nservers; i++) {
+			struct dhcp_server *ds = &iface->if_servers[i];
+			printf(" %s", ds->ds_name);
+			if (ds->ds_helper)
+				printf(" (helper)");
+		}
 		printf("\n");
 
 		printf("BPF buffer length: %d\n", iface->if_bpf_len);
@@ -604,6 +632,8 @@ iface_servers(struct iface *iface, int argc, char *argv[])
 			if (server->ds_name == NULL)
 				err(1, "server name alloc");
 
+			server->ds_helper = 0;
+
 			iface->if_servers = servers;
 			iface->if_nservers = n;
 		}
@@ -613,9 +643,65 @@ iface_servers(struct iface *iface, int argc, char *argv[])
 
 	if (iface->if_nservers == 0)
 		errx(1, "unable to resolve servers");
+}
 
-	qsort(iface->if_servers, iface->if_nservers,
-	    sizeof(*iface->if_servers), iface_cmp);
+void
+iface_helpers(struct iface *iface, struct dhcp_helpers *helpers)
+{
+	const struct addrinfo hints = {
+	    .ai_family = AF_INET,
+	    .ai_socktype = SOCK_DGRAM,
+	};
+	struct addrinfo *res0, *res;
+	struct dhcp_helper *dh;
+	char *host, *port;
+	int error;
+
+	while ((dh = TAILQ_FIRST(helpers)) != NULL) {
+		TAILQ_REMOVE(helpers, dh, dh_entry);
+		port = dh->dh_name;
+		free(dh);
+
+		host = strsep(&port, ":");
+
+		error = getaddrinfo(host, port, &hints, &res0);
+		if (error != 0) {
+			errx(1, "%s port %s: %s", host, port ? port : "*",
+			    gai_strerror(error));
+		}
+
+		for (res = res0; res != NULL; res = res->ai_next) {
+			struct dhcp_server *servers, *server;
+			unsigned int o, n;
+
+			if (res->ai_addrlen > sizeof(servers->ds_addr)) {
+				/* XXX */
+				continue;
+			}
+
+			o = iface->if_nservers;
+			n = o + 1;
+
+			servers = reallocarray(iface->if_servers,
+			    n, sizeof(*servers));
+			if (servers == NULL)
+				err(1, "server alloc");
+
+			server = &servers[o];
+			server->ds_addr = *sa2sin(res->ai_addr);
+			server->ds_name = strdup(
+			    inet_ntoa(server->ds_addr.sin_addr));
+			if (server->ds_name == NULL)
+				err(1, "server name alloc");
+
+			server->ds_helper = 1;
+
+			iface->if_servers = servers;
+			iface->if_nservers = n;
+		}
+
+		freeaddrinfo(res0);
+	}
 }
 
 /*
@@ -1055,7 +1141,12 @@ dhcp_if_relay(struct iface *iface, struct dhcp_packet *packet, size_t len)
 
 		for (j = 0; j < iface->if_nservers; j++) {
 			struct dhcp_server *ds = &iface->if_servers[j];
-			struct sockaddr_in *sin = &ds->ds_addr;
+			struct sockaddr_in *sin;
+
+			if (ds->ds_helper)
+				continue;
+
+			sin = &ds->ds_addr;
 
 			if (sendto(EVENT_FD(&gi->gi_ev), packet, len, 0,
 			    sin2sa(sin), sizeof(*sin)) == -1) {
