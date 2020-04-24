@@ -270,7 +270,7 @@ main(int argc, char *argv[])
 	struct dhcp_helper *dh;
 	unsigned int i;
 
-	while ((ch = getopt(argc, argv, "C:dh:i:NR:v")) != -1) {
+	while ((ch = getopt(argc, argv, "C:dh:H:i:NR:v")) != -1) {
 		switch (ch) {
 		case 'C':
 			if (circuit != NULL)
