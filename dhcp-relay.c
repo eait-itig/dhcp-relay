@@ -1443,7 +1443,10 @@ srvr_relay(struct iface *iface, struct dhcp_giaddr *gi,
 
 		case ENOMEM:
 		case ENOBUFS:
+		case EHOSTDOWN:
+		case EHOSTUNREACH:
 		case ENETDOWN:
+		case ENETUNREACH:
 		case EMSGSIZE:
 			break;
 
