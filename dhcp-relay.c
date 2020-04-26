@@ -864,7 +864,7 @@ dhcp_input(int fd, short events, void *arg)
 		case EAGAIN:
 			break;
 		default:
-			lerr(1, "BPF read");
+			lerr(1, "%s bpf read", iface->if_name);
 			/* NOTREACHED */
 		}
 		return;
@@ -1440,9 +1440,15 @@ srvr_relay(struct iface *iface, struct dhcp_giaddr *gi,
 		switch (errno) {
 		case EAGAIN:
 		case EINTR:
+
+		case ENOMEM:
+		case ENOBUFS:
+		case ENETDOWN:
+		case EMSGSIZE:
 			break;
+
 		default:
-			lerr(1, "bpf write");
+			lerr(1, "%s bpf write", iface->if_name);
 			/* NOTREACHED */
 		}
 
