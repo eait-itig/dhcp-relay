@@ -29,7 +29,8 @@ usage: dhcp-relay [-vd] [-C circuit] [-R remote] [-H hoplim] -i interface
   packets, eg, DHCP INFORM packets from clients sent directly to their
   server, or packets from other DHCP relays.
 - The ability to list extra "helper" servers that can send messages
-  via the relay the client network, but are not sent client requests.
+  via the relay to the client network, but are not sent client
+  requests.
 
 ## Missing `dhcrelay` features
 
