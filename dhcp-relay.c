@@ -178,7 +178,6 @@ struct iface {
 	struct event		 if_bpf_ev;
 	uint8_t			*if_bpf_buf;
 	unsigned int		 if_bpf_len;
-	unsigned int		 if_bpf_cur;
 
 	struct event		 if_siginfo;
 
@@ -788,7 +787,6 @@ iface_bpf_open(struct iface *iface)
 
 	iface->if_bpf_ev.ev_fd = fd;
 	iface->if_bpf_len = opt;
-	iface->if_bpf_cur = 0;
 }
 
 void
@@ -856,7 +854,7 @@ dhcp_input(int fd, short events, void *arg)
 	ssize_t rv;
 	uint8_t *buf = iface->if_bpf_buf;
 
-	rv = read(fd, buf + iface->if_bpf_cur, iface->if_bpf_len);
+	rv = read(fd, buf, iface->if_bpf_len);
 	switch (rv) {
 	case -1:
 		switch (errno) {
@@ -875,18 +873,24 @@ dhcp_input(int fd, short events, void *arg)
 		break;
 	}
 
-	len = iface->if_bpf_cur + rv;
+	len = rv;
 
-	while (len >= sizeof(*bh)) {
+	for (;;) {
+		/*
+		 * the kernel lied to us.
+		 */
+		if (len < sizeof(*bh))
+			lerrx(1, "%s: short BPF header", iface->if_name);
+
 		bh = (const struct bpf_hdr *)buf;
 		bpflen = bh->bh_hdrlen + bh->bh_caplen;
 
 		/*
 		 * If the bpf header plus data doesn't fit in what's
-		 * left of the buffer, stick head in sand yet again...
+		 * left of the buffer, we've got a problem...
 		 */
 		if (bpflen > len)
-			break;
+			lerrx(1, "%s: short BPF read", iface->if_name);
 
 		/*
 		 * If the captured data wasn't the whole packet, or if
@@ -902,24 +906,14 @@ dhcp_input(int fd, short events, void *arg)
 
 		bpflen = BPF_WORDALIGN(bpflen);
 		if (len <= bpflen) {
-			/* Short circuit if everything is consumed */
-			iface->if_bpf_cur = 0;
-			return;
+			/* everything is consumed */
+			break;
 		}
 
 		/* Move the loop to the next packet */
 		buf += bpflen;
 		len -= bpflen;
 	}
-
-	if (len > iface->if_bpf_len) {
-		lerrx(1, "len %zu > bpf len %u (iface=%p)", len,
-		    iface->if_bpf_len, iface);
-	}
-
-	iface->if_bpf_cur = len;
-	if (len && iface->if_bpf_buf != buf)
-		memmove(iface->if_bpf_buf, buf, len);
 }
 
 void
