@@ -851,7 +851,7 @@ void
 dhcp_input(int fd, short events, void *arg)
 {
 	struct iface *iface = arg;
-	struct bpf_hdr hdr;
+	struct bpf_hdr bh;
 	size_t len, bpflen;
 	ssize_t rv;
 	uint8_t *buf = iface->if_bpf_buf;
@@ -877,10 +877,10 @@ dhcp_input(int fd, short events, void *arg)
 
 	len = iface->if_bpf_cur + rv;
 
-	while (len >= sizeof(hdr)) {
+	while (len >= sizeof(bh)) {
 		/* Copy out a bpf header... */
-		memcpy(&hdr, buf, sizeof(hdr));
-		bpflen = hdr.bh_hdrlen + hdr.bh_caplen;
+		memcpy(&bh, buf, sizeof(bh));
+		bpflen = bh.bh_hdrlen + bh.bh_caplen;
 
 		/*
 		 * If the bpf header plus data doesn't fit in what's
@@ -894,11 +894,11 @@ dhcp_input(int fd, short events, void *arg)
 		 * the packet won't fit in the input buffer, all we can
 		 * do is skip it.
 		 */
-		if (hdr.bh_caplen < hdr.bh_datalen)
+		if (bh.bh_caplen < bh.bh_datalen)
 			iface->if_bpf_short++;
 		else {
 			dhcp_pkt_input(iface,
-			    buf + hdr.bh_hdrlen, hdr.bh_datalen);
+			    buf + bh.bh_hdrlen, bh.bh_datalen);
 		}
 
 		bpflen = BPF_WORDALIGN(bpflen);
