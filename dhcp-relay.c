@@ -809,7 +809,7 @@ iface_rai_add(struct iface *iface, uint8_t code, const char *value,
 
 	hdr = (struct dhcp_opt_header *)(iface->if_rai + rlen);
 	hdr->code = code;
-	hdr->len = olen;
+	hdr->len = vlen;
 	memcpy(hdr + 1, value, vlen);
 
 	iface->if_railen = nlen;
