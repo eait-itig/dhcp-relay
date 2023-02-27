@@ -361,7 +361,7 @@ main(int argc, char *argv[])
 		if (gi->gi_name == NULL)
 			err(1, "gi name alloc");
 
-		sin->sin_port = htons(SERVER_PORT);
+		sin->sin_port = htons(CLIENT_PORT);
 
 		fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
 		if (fd == -1)
@@ -1407,7 +1407,7 @@ srvr_relay(struct iface *iface, struct dhcp_giaddr *gi,
 
 	iph->ip_sum = cksum(iph, sizeof(*iph));
 
-	udph->uh_sport = gi->gi_sin.sin_port;
+	udph->uh_sport = htons(SERVER_PORT);
 	udph->uh_dport = htons(CLIENT_PORT);
 	udph->uh_ulen = htons(udplen);
 	udph->uh_sum = htons(0);
