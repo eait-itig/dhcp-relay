@@ -361,7 +361,7 @@ main(int argc, char *argv[])
 		if (gi->gi_name == NULL)
 			err(1, "gi name alloc");
 
-		sin->sin_port = htons(CLIENT_PORT);
+		sin->sin_port = htons(SERVER_PORT);
 
 		fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
 		if (fd == -1)
