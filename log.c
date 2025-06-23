@@ -32,6 +32,7 @@ static const struct loggers conslogger = {
 	errx,
 	warnc,
 	warnx,
+	warnx,
 	warnx
 };
 
@@ -44,6 +45,7 @@ static __dead void	syslog_errx(int, const char *, ...)
 static void		syslog_warnc(int, const char *, ...);
 static void		syslog_warnx(const char *, ...);
 static void		syslog_info(const char *, ...);
+static void		syslog_debug(const char *, ...);
 static void		syslog_vstrerror(int, int, const char *, va_list);
 
 static const struct loggers syslogger = {
@@ -52,6 +54,7 @@ static const struct loggers syslogger = {
 	syslog_warnc,
 	syslog_warnx,
 	syslog_info,
+	syslog_debug,
 };
 
 static void
@@ -120,6 +123,16 @@ syslog_info(const char *fmt, ...)
 
 	va_start(ap, fmt);
 	vsyslog(LOG_INFO, fmt, ap);
+	va_end(ap);
+}
+
+static void
+syslog_debug(const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsyslog(LOG_DEBUG, fmt, ap);
 	va_end(ap);
 }
 

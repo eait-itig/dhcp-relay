@@ -30,6 +30,8 @@ struct loggers {
 			    __attribute__((__format__ (printf, 1, 2)));
 	void		(*info)(const char *, ...)
 			    __attribute__((__format__ (printf, 1, 2)));
+	void		(*debug)(const char *, ...)
+			    __attribute__((__format__ (printf, 1, 2)));
 };
 
 extern const struct loggers *logger;
@@ -41,6 +43,7 @@ void	logger_syslog(const char *);
 #define lwarnc(_c, _f...)	logger->warnc((_c), _f)
 #define lwarnx(_f...)		logger->warnx(_f)
 #define linfo(_f...)		logger->info(_f)
+#define ldebug(_f...)		logger->debug(_f)
 
 #define lerr(_e, _f...)		lerrc((_e), errno, _f)
 #define lwarn(_f...)		lwarnc(errno, _f)
