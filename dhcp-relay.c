@@ -1228,10 +1228,14 @@ srvr_input(int fd, short events, void *arg)
 		return;
 	}
 
-	if (len < BOOTP_MIN_LEN)
+	if (len < BOOTP_MIN_LEN) {
+		ldebug("%s: short packet", __func__);
 		return;
-	if (sinlen < sizeof(sin))
+	}
+	if (sinlen < sizeof(sin)) {
+		ldebug("%s: short address", __func__);
 		return;
+	}
 
 	if (packet->op != BOOTREPLY) {
 		iface->if_srvr_op++;
@@ -1289,16 +1293,18 @@ srvr_input(int fd, short events, void *arg)
 		}
 	}
 
-	if (memcmp(packet->cookie, DHCP_OPTIONS_COOKIE,
-	    sizeof(packet->cookie)) != 0) {
-		/* invalid signature */
-		return;
-	}
-
 	ds = bsearch(&sin, iface->if_servers, iface->if_nservers,
 	    sizeof(*iface->if_servers), iface_cmp);
 	if (ds == NULL) {
 		iface->if_srvr_unknown++;
+		return;
+	}
+
+	if (memcmp(packet->cookie, DHCP_OPTIONS_COOKIE,
+	    sizeof(packet->cookie)) != 0) {
+		ldebug("%s: not DHCP?", __func__);
+		/* old school BOOTP? */
+		srvr_relay(iface, gi, ds->ds_name, packet, len);
 		return;
 	}
 
