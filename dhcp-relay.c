@@ -1165,10 +1165,10 @@ dhcp_if_relay(struct iface *iface, struct dhcp_packet *packet, size_t len)
 
 			if (verbose) {
 				linfo("forwarded BOOTREQUEST for "
-				    ETHER_FMT " on %s from %s to %s",
+				    ETHER_FMT " xid %08x on %s from %s to %s",
 				    ETHER_ARGS(packet->chaddr),
-				    iface->if_name, gi->gi_name,
-				    ds->ds_name);
+				    ntohl(packet->xid), iface->if_name,
+				    gi->gi_name, ds->ds_name);
 			}
 		}
 	}
@@ -1459,9 +1459,10 @@ srvr_relay(struct iface *iface, struct dhcp_giaddr *gi,
 	}
 
 	if (verbose) {
-		linfo("forwarded BOOTREPLY for " ETHER_FMT " on %s"
+		linfo("forwarded BOOTREPLY for " ETHER_FMT " xid %08x on %s"
 		    " from %s to %s", ETHER_ARGS(packet->chaddr),
-		    iface->if_name, srvr_name, gi->gi_name);
+		    ntohl(packet->xid), iface->if_name, srvr_name,
+		    gi->gi_name);
 	}
 }
 
