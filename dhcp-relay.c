@@ -1,7 +1,7 @@
 /*	$OpenBSD: tftpd.c,v 1.39 2017/05/26 17:38:46 florian Exp $	*/
 
 /*
- * Copyright (c) 2017 The University of Queensland
+ * Copyright (c) 2017, 2025, 2026 The University of Queensland
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -74,7 +74,7 @@
 #include <net/if_media.h>
 #include <net/if_types.h>
 
-#include <net/bpf.h>
+#include <net/route.h>
 
 #include <arpa/inet.h> /* inet_ntoa */
 #include <netinet/ip.h>
@@ -105,10 +105,20 @@
 #include "dhcp.h"
 #include "log.h"
 
+#ifndef ISSET
+#define ISSET(_v, _m)	((_v) & (_m))
+#endif
+
 #define SERVER_PORT	67
 #define CLIENT_PORT	68
 #define DHCP_USER	"_dhcp"
 #define CHADDR_SIZE	16
+
+#if 0
+#define LLADDR_HELPER_PROCTITLE "lladdr helper"
+#else
+#define LLADDR_HELPER_PROCTITLE "arpendage"
+#endif
 
 struct dhcp_opt_header {
 	uint8_t		code;
@@ -126,6 +136,26 @@ struct dhcp_opt_header {
 #define nitems(_a)	(sizeof((_a)) / sizeof((_a)[0]))
 #endif
 
+#ifndef roundup
+#define roundup(x, y)	((((x)+((y)-1))/(y))*(y))
+#endif
+
+#define CMSG_FOREACH(_cmsg, _msgp) \
+	for ((_cmsg) = CMSG_FIRSTHDR((_msgp)); \
+	     (_cmsg) != NULL; \
+	     (_cmsg) = CMSG_NXTHDR((_msgp), (_cmsg)))
+
+static inline int
+cmsg_match(const struct cmsghdr *cmsg, size_t len, int level, int type)
+{
+	return (cmsg->cmsg_len == CMSG_LEN(len) &&
+	    cmsg->cmsg_level == level &&
+	    cmsg->cmsg_type == type);
+}
+
+#define CMSG_MATCH(_cmsg, _len, _level, _type) \
+	cmsg_match((_cmsg), (_len), (_level), (_type))
+
 #define sin2sa(_sin)	(struct sockaddr *)(_sin)
 #define sa2sin(_sa)	(struct sockaddr_in *)(_sa)
 
@@ -139,7 +169,8 @@ TAILQ_HEAD(dhcp_helpers, dhcp_helper);
 
 struct dhcp_giaddr {
 	struct iface		*gi_if;
-	struct sockaddr_in	 gi_sin;
+	struct sockaddr_in	 gi_addr;
+	struct sockaddr_in	 gi_broadcast;
 	struct event		 gi_ev;
 	const char		*gi_name;
 };
@@ -150,9 +181,20 @@ struct dhcp_server {
 	unsigned int		 ds_helper;
 };
 
+struct dhcp_reply {
+	uint8_t			 dr_buf[DHCP_MAX_MSG];
+	size_t			 dr_len;
+	struct dhcp_giaddr	*dr_gi;
+	struct dhcp_server	*dr_ds;
+};
+#define IFACE_REPLY_RING_BITS	 4
+#define IFACE_REPLY_RING_SIZE	 (1U << IFACE_REPLY_RING_BITS)
+#define IFACE_REPLY_RING_MASK	 (IFACE_REPLY_RING_SIZE - 1)
+
 struct iface {
 	const char		*if_name;
 	unsigned int		 if_index;
+	u_char			 if_type;
 	int			 if_nakfilt;
 
 	struct dhcp_server	*if_servers;
@@ -160,9 +202,14 @@ struct iface {
 
 	uint8_t			 if_hwaddr[16];
 	unsigned int		 if_hwaddrlen;
+	uint32_t		 if_rdomain;
 
 	struct dhcp_giaddr	*if_giaddrs;
 	unsigned int		 if_ngiaddrs;
+	struct dhcp_reply	 if_replies[IFACE_REPLY_RING_SIZE];
+	unsigned int		 if_replies_head;
+	unsigned int		 if_replies_tail;
+	unsigned int		 if_rtseq;
 
 	uint8_t			 if_hoplim;
 
@@ -175,13 +222,12 @@ struct iface {
 				      struct dhcp_giaddr *, const char *,
 				      struct dhcp_packet *, size_t);
 
-	struct event		 if_bpf_ev;
-	uint8_t			*if_bpf_buf;
-	unsigned int		 if_bpf_len;
+	struct event		 if_bcast_ev;
+	struct event		 if_llh_ev;
 
 	struct event		 if_siginfo;
 
-	uint64_t		 if_bpf_short;
+	uint64_t		 if_bcast_short;
 	uint64_t		 if_ether_len;
 	uint64_t		 if_ip_len;
 	uint64_t		 if_ip_cksum;
@@ -196,13 +242,16 @@ struct iface {
 	uint64_t		 if_srvr_op;
 	uint64_t		 if_srvr_giaddr;
 	uint64_t		 if_srvr_unknown;
+	uint64_t		 if_discards;
 };
 
 __dead void	 usage(void);
 int		 rdaemon(int);
 
 struct iface	*iface_get(const char *);
-void		 iface_bpf_open(struct iface *);
+void		 iface_bcast_open(struct iface *);
+ssize_t		 iface_bcast_recv(struct iface *, int, void *, size_t,
+		     struct sockaddr_in *);
 void		 iface_rai_set(struct iface *, const char *, const char *);
 void		 iface_rai_add(struct iface *, uint8_t,  const char *,
 		     const char *);
@@ -213,7 +262,9 @@ void		 iface_siginfo(int, short, void *);
 
 void		 dhcp_input(int, short, void *);
 void		 dhcp_pkt_input(struct iface *, const uint8_t *, size_t);
-void		 dhcp_relay(struct iface *, const void *, size_t);
+void		 dhcp_relay(struct iface *,
+		     uint8_t [static DHCP_MAX_MSG], size_t,
+		     const struct sockaddr_in *);
 void		 dhcp_if_relay(struct iface *, struct dhcp_packet *, size_t);
 void		 dhcp_if_relay_rai(struct iface *, struct dhcp_packet *,
 		     size_t);
@@ -223,16 +274,9 @@ void		 srvr_relay_rai(struct iface *, struct dhcp_giaddr *,
 void		 srvr_relay(struct iface *, struct dhcp_giaddr *,
 		     const char *, struct dhcp_packet *, size_t);
 
-static uint32_t	 cksum_add(const void *, size_t, uint32_t);
-static uint16_t	 cksum_fini(uint32_t);
-
-static inline uint32_t
-cksum_word(uint16_t word, uint32_t cksum)
-{
-	return (cksum + htons(word));
-}
-
-#define cksum(_b, _l)	cksum_fini(cksum_add((_b), (_l), 0))
+static int	 lladdr_helper(struct iface *, int);
+static void	 lladdr_reply(int, short, void *);
+static int	 lladdr_add(struct iface *, struct dhcp_reply *);
 
 __dead void
 usage(void)
@@ -340,22 +384,24 @@ main(int argc, char *argv[])
 		errx(1, "Ethernet interface %s not found", ifname);
 	if (iface->if_ngiaddrs == 0)
 		errx(1, "interface %s no IPv4 addresses", ifname);
+	if (setrtable(iface->if_rdomain) == -1)
+		err(1, "setrtable %s rdomain %u", ifname, iface->if_rdomain);
 
 	if (hoplim != -1)
 		iface->if_hoplim = hoplim;
 
-	iface_bpf_open(iface);
+	iface_bcast_open(iface);
 	iface_rai_set(iface, circuit, remote);
 
-	iface->if_bpf_buf = malloc(iface->if_bpf_len * 2);
-	if (iface->if_bpf_buf == NULL)
-		err(1, "BPF buffer");
-
 	for (i = 0; i < iface->if_ngiaddrs; i++) {
+		struct ip_mreqn mreqn = {
+			.imr_ifindex = iface->if_index,
+		};
 		struct dhcp_giaddr *gi = &iface->if_giaddrs[i];
-		struct sockaddr_in *sin = &gi->gi_sin;
+		struct sockaddr_in *sin = &gi->gi_addr;
 		int fd;
 		int opt;
+		u_char loop;
 
 		gi->gi_name = strdup(inet_ntoa(sin->sin_addr));
 		if (gi->gi_name == NULL)
@@ -365,17 +411,27 @@ main(int argc, char *argv[])
 
 		fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
 		if (fd == -1)
-			err(1, "socket");
+			err(1, "%s socket", gi->gi_name);
+
+		if (setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF,
+		    &mreqn, sizeof(mreqn)) == -1)
+			err(1, "%s set IP_MULTICAST_IF", gi->gi_name);
 
 		opt = 1;
-		if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT,
+		if (setsockopt(fd, SOL_SOCKET, SO_BROADCAST,
 		    &opt, sizeof(opt)) == -1)
-			err(1, "setsockopt(SO_REUSEPORT)");
+			err(1, "%s enable SO_BROADCAST", gi->gi_name);
+
+		loop = 0;
+		if (setsockopt(fd, IPPROTO_IP, IP_MULTICAST_LOOP,
+		    &loop, sizeof(loop)) == -1) {
+			err(1, "%s disable IP_MULTICAST_LOOP", gi->gi_name);
+		}
 
 		if (bind(fd, sin2sa(sin), sizeof(*sin)) == -1)
-			err(1, "bind to %s", inet_ntoa(sin->sin_addr));
+			err(1, "bind to %s", gi->gi_name);
 
-		iface->if_giaddrs[i].gi_ev.ev_fd = fd;
+		event_set(&gi->gi_ev, fd, 0, NULL, NULL);
 	}
 
 	iface_servers(iface, argc, argv);
@@ -400,8 +456,6 @@ main(int argc, char *argv[])
 				printf(" (helper)");
 		}
 		printf("\n");
-
-		printf("BPF buffer length: %d\n", iface->if_bpf_len);
 	} else {
 		extern char *__progname;
 
@@ -418,8 +472,12 @@ main(int argc, char *argv[])
 		err(1, "chdir %s", pw->pw_dir);
 
 	if (setgroups(1, &pw->pw_gid) ||
-	    setresgid(pw->pw_gid, pw->pw_gid, pw->pw_gid) ||
-	    setresuid(pw->pw_uid, pw->pw_uid, pw->pw_uid))
+	    setresgid(pw->pw_gid, pw->pw_gid, pw->pw_gid))
+		errx(1, "can't drop privileges");
+
+	iface->if_llh_ev.ev_fd = lladdr_helper(iface, devnull);
+
+	if (setresuid(pw->pw_uid, pw->pw_uid, pw->pw_uid))
 		errx(1, "can't drop privileges");
 
 	if (!debug && rdaemon(devnull) == -1)
@@ -427,9 +485,13 @@ main(int argc, char *argv[])
 
 	event_init();
 
-	event_set(&iface->if_bpf_ev, iface->if_bpf_ev.ev_fd,
+	event_set(&iface->if_bcast_ev, iface->if_bcast_ev.ev_fd,
 	    EV_READ | EV_PERSIST, dhcp_input, iface);
-	event_add(&iface->if_bpf_ev, NULL);
+	event_add(&iface->if_bcast_ev, NULL);
+
+	event_set(&iface->if_llh_ev, iface->if_llh_ev.ev_fd,
+	    EV_READ | EV_PERSIST, lladdr_reply, iface);
+	event_add(&iface->if_llh_ev, NULL);
 
 	for (i = 0; i < iface->if_ngiaddrs; i++) {
 		struct dhcp_giaddr *gi = &iface->if_giaddrs[i];
@@ -454,18 +516,19 @@ iface_siginfo(int sig, short events, void *arg)
 {
 	struct iface *iface = arg;
 
-	linfo("iface:%s bpf_short:%llu ether_len:%llu "
+	linfo("iface:%s bcast_short:%llu ether_len:%llu "
 	    "ip_len:%llu ip_cksum:%llu "
 	    "udp_len:%llu udp_cksum:%llu "
 	    "dhcp_len:%llu dhcp_opt_len:%llu dhcp_op:%llu "
 	    "dhcp_hops:%llu dhcp_nakfilt:%llu "
-	    "srvr_op:%llu srvr_giaddr:%llu srvr_unknown:%llu",
-	    iface->if_name, iface->if_bpf_short, iface->if_ether_len,
+	    "srvr_op:%llu srvr_giaddr:%llu srvr_unknown:%llu discards:%llu",
+	    iface->if_name, iface->if_bcast_short, iface->if_ether_len,
 	    iface->if_ip_len, iface->if_ip_cksum,
 	    iface->if_udp_len, iface->if_udp_cksum,
 	    iface->if_dhcp_len, iface->if_dhcp_opt_len, iface->if_dhcp_op,
 	    iface->if_dhcp_hops, iface->if_dhcp_nakfilt,
-	    iface->if_srvr_op, iface->if_srvr_giaddr, iface->if_srvr_unknown);
+	    iface->if_srvr_op, iface->if_srvr_giaddr, iface->if_srvr_unknown,
+	    iface->if_discards);
 }
 
 #if 0
@@ -532,7 +595,12 @@ iface_get(const char *ifname)
 				err(1, "giaddrs alloc");
 
 			giaddrs[o].gi_if = iface;
-			giaddrs[o].gi_sin = *sin;
+			giaddrs[o].gi_addr = *sin;
+
+			sin = &giaddrs[o].gi_broadcast;
+			*sin = *(struct sockaddr_in *)ifa->ifa_broadaddr;
+			if (sin->sin_addr.s_addr == htonl(INADDR_ANY))
+				sin->sin_addr.s_addr = htonl(INADDR_BROADCAST);
 
 			iface->if_giaddrs = giaddrs;
 			iface->if_ngiaddrs = n;
@@ -542,8 +610,7 @@ iface_get(const char *ifname)
 		case AF_LINK:
 			ifi = (struct if_data *)ifa->ifa_data;
 
-			if (ifi->ifi_type != IFT_ETHER &&
-			    ifi->ifi_type != IFT_CARP)
+			if (ifi->ifi_type != IFT_ETHER)
 				break;
 
 			sdl = (struct sockaddr_dl *)ifa->ifa_addr;
@@ -554,6 +621,9 @@ iface_get(const char *ifname)
 			iface->if_index = sdl->sdl_index;
 			memcpy(iface->if_hwaddr, LLADDR(sdl), sdl->sdl_alen);
 			iface->if_hwaddrlen = sdl->sdl_alen;
+
+			iface->if_type = ifi->ifi_type;
+			iface->if_rdomain = ifi->ifi_rdomain;
 			break;
 
 		default:
@@ -703,90 +773,36 @@ iface_helpers(struct iface *iface, struct dhcp_helpers *helpers)
 	}
 }
 
-/*
- * Packet filter program: 'ip and udp and dst port SERVER_PORT'
- */
-/* const */ struct bpf_insn dhcp_bpf_rfilter[] = {
-	/* Make sure this is "locally delivered" packet, ie, mcast/bcast */
-	BPF_STMT(BPF_LD + BPF_B + BPF_ABS, 0),
-	BPF_JUMP(BPF_JMP + BPF_JSET + BPF_K, 1, 0, 10),
-
-	/* Make sure this is an IP packet... */
-	BPF_STMT(BPF_LD + BPF_H + BPF_ABS, 12),
-	BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, ETHERTYPE_IP, 0, 8),
-
-	/* Make sure it's a UDP packet... */
-	BPF_STMT(BPF_LD + BPF_B + BPF_ABS, 23),
-	BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, IPPROTO_UDP, 0, 6),
-
-	/* Make sure this isn't a fragment... */
-	BPF_STMT(BPF_LD + BPF_H + BPF_ABS, 20),
-	BPF_JUMP(BPF_JMP + BPF_JSET + BPF_K, 0x1fff, 4, 0),
-
-	/* Get the IP header length... */
-	BPF_STMT(BPF_LDX + BPF_B + BPF_MSH, 14),
-
-	/* Make sure it's to the right port... */
-	BPF_STMT(BPF_LD + BPF_H + BPF_IND, 16),
-	BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, SERVER_PORT, 0, 1),
-
-	/* If we passed all the tests, ask for the whole packet. */
-	BPF_STMT(BPF_RET+BPF_K, (u_int)-1),
-
-	/* Otherwise, drop it. */
-	BPF_STMT(BPF_RET+BPF_K, 0),
-};
-
 void
-iface_bpf_open(struct iface *iface)
+iface_bcast_open(struct iface *iface)
 {
-	struct ifreq ifr;
-	struct bpf_version v;
-	struct bpf_program p;
+	static const struct sockaddr_in sin = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_BROADCAST),
+		.sin_port = htons(SERVER_PORT),
+	};
 	int opt;
 	int fd;
 
-	fd = open("/dev/bpf", O_RDWR|O_NONBLOCK);
+	fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, IPPROTO_UDP);
 	if (fd == -1)
-		err(1, "/dev/bpf");
-
-	if (ioctl(fd, BIOCVERSION, &v) == -1)
-		err(1, "get BPF version");
-
-	if (v.bv_major != BPF_MAJOR_VERSION || v.bv_minor < BPF_MINOR_VERSION)
-		errx(1, "kerel BPF version is too high, recompile!");
-
-	memset(&ifr, 0, sizeof(ifr));
-	if (strlcpy(ifr.ifr_name, iface->if_name, sizeof(ifr.ifr_name)) >=
-	    sizeof(ifr.ifr_name))
-		errx(1, "interface name is too long");
-
-	if (ioctl(fd, BIOCSETIF, &ifr) == -1)
-		err(1, "unable to set BPF interface to %s", iface->if_name);
+		err(1, "%s broadcast socket", iface->if_name);
 
 	opt = 1;
-	if (ioctl(fd, BIOCIMMEDIATE, &opt) == -1)
-		err(1, "unable to set BPF immediate mode");
+	if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) == -1)
+		err(1, "%s broadcast enable SO_REUSEADDR", iface->if_name);
 
-	if (ioctl(fd, BIOCGBLEN, &opt) == -1)
-		err(1, "unable to get BPF buffer length");
+	opt = 1;
+	if (setsockopt(fd, IPPROTO_IP, IP_RECVIF, &opt, sizeof(opt)) == -1)
+		err(1, "%s broadcast enable IP_RECVIF", iface->if_name);
 
-	if (opt < DHCP_FIXED_LEN) {
-		errx(1, "BPF buffer length is too short: %d < %d",
-		    opt, DHCP_FIXED_LEN);
-	}
+	if (bind(fd, (const struct sockaddr *)&sin, sizeof(sin)) == -1)
+		err(1, "%s broadcast bind", iface->if_name);
 
-	p.bf_len = nitems(dhcp_bpf_rfilter);
-	p.bf_insns = dhcp_bpf_rfilter;
+	if (shutdown(fd, SHUT_WR) == -1)
+		err(1, "%s broadcast send shutdown", iface->if_name);
 
-	if (ioctl(fd, BIOCSETF, &p) == -1)
-		err(1, "unable to set BPF read filter");
-
-	if (ioctl(fd, BIOCLOCK) == -1)
-		err(1, "unable to lock BPF descriptor");
-
-	iface->if_bpf_ev.ev_fd = fd;
-	iface->if_bpf_len = opt;
+	event_set(&iface->if_bcast_ev, fd, 0, NULL, NULL);
 }
 
 void
@@ -845,155 +861,83 @@ iface_rai_set(struct iface *iface, const char *circuit, const char *remote)
 	iface->if_srvr_relay = srvr_relay_rai;
 }
 
+ssize_t
+iface_bcast_recv(struct iface *iface, int fd, void *buf, size_t len,
+    struct sockaddr_in *src)
+{
+	const struct sockaddr_dl *sdl;
+	struct iovec iov[1] = {
+		{ .iov_base = buf, .iov_len = len },
+	};
+	union {
+		struct cmsghdr hdr;
+		char buf[CMSG_SPACE(sizeof(*sdl))];
+	} cmsgbuf;
+	struct msghdr msg = {
+		.msg_name = src,
+		.msg_namelen = sizeof(*src),
+		.msg_iov = iov,
+		.msg_iovlen = nitems(iov),
+		.msg_control = &cmsgbuf.buf,
+		.msg_controllen = sizeof(cmsgbuf.buf),
+	};
+	struct cmsghdr *cmsg;
+	ssize_t rv;
+
+	rv = recvmsg(fd, &msg, 0);
+	if (rv == -1) {
+		switch (errno) {
+		case EINTR:
+		case EAGAIN:
+			return (0);
+		default:
+			break;
+		}
+		return (rv);
+	}
+
+	CMSG_FOREACH(cmsg, &msg) {
+		if (CMSG_MATCH(cmsg, sizeof(*sdl), IPPROTO_IP, IP_RECVIF))
+			sdl = (struct sockaddr_dl *)CMSG_DATA(cmsg);
+	}
+
+	if (iface->if_index != sdl->sdl_index)
+		return (0);
+
+	return (rv);
+}
+
 void
 dhcp_input(int fd, short events, void *arg)
 {
 	struct iface *iface = arg;
-	const struct bpf_hdr *bh;
-	size_t len, bpflen;
+	size_t len;
 	ssize_t rv;
-	uint8_t *buf = iface->if_bpf_buf;
+	uint8_t buf[DHCP_MAX_MSG];
+	struct sockaddr_in src;
 
-	rv = read(fd, buf, iface->if_bpf_len);
+	rv = iface_bcast_recv(iface, fd, buf, sizeof(buf), &src);
 	switch (rv) {
 	case -1:
-		switch (errno) {
-		case EINTR:
-		case EAGAIN:
-			break;
-		default:
-			lerr(1, "%s bpf read", iface->if_name);
-			/* NOTREACHED */
-		}
-		return;
-	case 0:
-		lerrx(0, "%s BPF has closed", iface->if_name);
+		lerr(1, "%s bcast read", iface->if_name);
 		/* NOTREACHED */
+	case 0:
+		/* the message wasn't for us */
+		return;
 	default:
 		break;
 	}
 
 	len = rv;
 
-	for (;;) {
-		/*
-		 * the kernel lied to us.
-		 */
-		if (len < sizeof(*bh))
-			lerrx(1, "%s: short BPF header", iface->if_name);
-
-		bh = (const struct bpf_hdr *)buf;
-		bpflen = bh->bh_hdrlen + bh->bh_caplen;
-
-		/*
-		 * If the bpf header plus data doesn't fit in what's
-		 * left of the buffer, we've got a problem...
-		 */
-		if (bpflen > len)
-			lerrx(1, "%s: short BPF read", iface->if_name);
-
-		/*
-		 * If the captured data wasn't the whole packet, or if
-		 * the packet won't fit in the input buffer, all we can
-		 * do is skip it.
-		 */
-		if (bh->bh_caplen < bh->bh_datalen)
-			iface->if_bpf_short++;
-		else {
-			dhcp_pkt_input(iface,
-			    buf + bh->bh_hdrlen, bh->bh_datalen);
-		}
-
-		bpflen = BPF_WORDALIGN(bpflen);
-		if (len <= bpflen) {
-			/* everything is consumed */
-			break;
-		}
-
-		/* Move the loop to the next packet */
-		buf += bpflen;
-		len -= bpflen;
-	}
+	dhcp_relay(iface, buf, len, &src);
 }
 
 void
-dhcp_pkt_input(struct iface *iface, const uint8_t *pkt, size_t len)
+dhcp_relay(struct iface *iface,
+    uint8_t buf[static DHCP_MAX_MSG], size_t len,
+    const struct sockaddr_in *src)
 {
-	const struct ether_header *eh;
-	struct ip iph;
-	struct udphdr udph;
-	unsigned int iplen, udplen;
-	uint32_t cksum;
-	uint16_t udpsum;
-
-	if (len < sizeof(*eh)) {
-		iface->if_ether_len++;
-		return;
-	}
-
-	/* the bpf filter has already checked ether and ip proto types */
-
-	eh = (const struct ether_header *)pkt;
-	pkt += sizeof(*eh);
-	len -= sizeof(*eh);
-
-	if (len < sizeof(iph)) {
-		iface->if_ip_len++;
-		return;
-	}
-
-	memcpy(&iph, pkt, sizeof(iph));
-	iplen = iph.ip_hl << 2;
-	if (len < iplen) {
-		iface->if_ip_len++;
-		return;
-	}
-
-	if (cksum(pkt, iplen) != 0) {
-		iface->if_ip_cksum++;
-		return;
-	}
-
-	pkt += iplen;
-	len -= iplen;
-
-	if (len < sizeof(udph)) {
-		iface->if_udp_len++;
-		return;
-	}
-
-	memcpy(&udph, pkt, sizeof(udph));
-	udplen = ntohs(udph.uh_ulen);
-	if (len < udplen) {
-		iface->if_udp_len++;
-		return;
-	}
-
-	udpsum = udph.uh_sum;
-	if (udpsum) {
-		cksum = cksum_add(&iph.ip_src,
-		    sizeof(iph.ip_src) + sizeof(iph.ip_dst), 0);
-		cksum = cksum_word(IPPROTO_UDP, cksum);
-		cksum = cksum_word(udplen, cksum);
-		cksum = cksum_add(pkt, len, cksum);
-
-		if (cksum_fini(cksum) != 0) {
-			/* check for 0x0000? */
-			iface->if_udp_cksum++;
-			return;
-		}
-	}
-
-	pkt += sizeof(udph);
-	len = udplen - sizeof(udph); /* drop extra bytes */
-
-	dhcp_relay(iface, pkt, len);
-}
-
-void
-dhcp_relay(struct iface *iface, const void *pkt, size_t len)
-{
-	uint8_t buf[DHCP_MAX_MSG];
 	struct dhcp_packet *packet = (struct dhcp_packet *)buf;
 	ssize_t olen;
 	uint8_t hops;
@@ -1007,12 +951,7 @@ dhcp_relay(struct iface *iface, const void *pkt, size_t len)
 		iface->if_dhcp_len++;
 		return;
 	}
-	if (len > sizeof(buf)) {
-		iface->if_dhcp_len++;
-		return;
-	}
 
-	memcpy(packet, pkt, len); /* align packet */
 	if (packet->op != BOOTREQUEST) {
 		iface->if_dhcp_op++;
 		return;
@@ -1130,7 +1069,7 @@ dhcp_if_relay(struct iface *iface, struct dhcp_packet *packet, size_t len)
 		struct dhcp_giaddr *gi = &iface->if_giaddrs[i];
 
 		if (giaddr)
-			packet->giaddr = gi->gi_sin.sin_addr;
+			packet->giaddr = gi->gi_addr.sin_addr;
 
 		for (j = 0; j < iface->if_nservers; j++) {
 			struct dhcp_server *ds = &iface->if_servers[j];
@@ -1174,33 +1113,130 @@ dhcp_if_relay(struct iface *iface, struct dhcp_packet *packet, size_t len)
 	}
 }
 
-static uint32_t
-cksum_add(const void *buf, size_t len, uint32_t sum)
+static struct dhcp_server *
+dhcp_validate(struct iface *iface, struct dhcp_giaddr *gi,
+    const void *buf, size_t len,
+    const struct sockaddr_in *sin, socklen_t sinlen)
 {
-	const uint16_t *words = buf;
+	const struct dhcp_packet *packet = buf;
+	struct dhcp_server *ds;
 
-	while (len > 1) {
-		sum += *words++;
-		len -= sizeof(*words);
+	if (len < BOOTP_MIN_LEN)
+		return (NULL);
+	if (sinlen < sizeof(sin))
+		return (NULL);
+
+	if (packet->op != BOOTREPLY) {
+		iface->if_srvr_op++;
+		return (NULL);
 	}
 
-	if (len == 1) {
-		const uint8_t *bytes = (const uint8_t *)words;
-		sum = cksum_word(*bytes << 8, sum);
+	if (packet->giaddr.s_addr != gi->gi_addr.sin_addr.s_addr) {
+		/* Filter packet that is not meant for us */
+		iface->if_srvr_giaddr++;
+		return (NULL);
 	}
 
-	return (sum);
+	if (packet->hlen != ETHER_ADDR_LEN) {
+		/* nope */
+		iface->if_dhcp_hlen++;
+		return (NULL);
+	}
+
+	if (iface->if_nakfilt) {
+		uint8_t mlen;
+		const uint8_t *opts = (const uint8_t *)(packet + 1);
+		ssize_t orv = dhcp_opt_end(opts, len - sizeof(*packet),
+		    DHO_DHCP_MESSAGE_TYPE);
+		size_t olen;
+		if (orv == -1) {
+			/* too short or missing opts */
+			iface->if_dhcp_len++;
+			return (NULL);
+		}
+		olen = orv;
+
+		olen++; /* move to the len */
+		if (olen >= len) {
+			/* too short */
+			iface->if_dhcp_len++;
+			return (NULL);
+		}
+
+		mlen = opts[olen];
+		if (mlen != 1) {
+			/* unknown message length */
+			iface->if_dhcp_len++;
+			return (NULL);
+		}
+
+		olen++; /* move to the value */
+		if (olen >= len) {
+			/* too short */
+			iface->if_dhcp_len++;
+			return (NULL);
+		}
+
+		if (opts[olen] == DHCPNAK) {
+			/* filter */
+			iface->if_dhcp_nakfilt++;
+			return (NULL);
+		}
+	}
+
+	if (memcmp(packet->cookie, DHCP_OPTIONS_COOKIE,
+	    sizeof(packet->cookie)) != 0) {
+		/* invalid signature */
+		return (NULL);
+	}
+
+	ds = bsearch(sin, iface->if_servers, iface->if_nservers,
+	    sizeof(*iface->if_servers), iface_cmp);
+	if (ds == NULL) {
+		iface->if_srvr_unknown++;
+		return (NULL);
+	}
+
+	return (ds);
 }
 
-static uint16_t
-cksum_fini(uint32_t sum)
+static void
+srvr_discard(int fd, struct iface *iface, struct dhcp_giaddr *gi)
 {
-	uint16_t cksum;
+	uint8_t buf[DHCP_MAX_MSG];
+	struct sockaddr_in sin;
+	socklen_t sinlen = sizeof(sin);
+	struct dhcp_server *ds;
+	ssize_t rv;
 
-	cksum = sum;
-	cksum += sum >> 16;
+	rv = recvfrom(fd, buf, sizeof(buf), 0, sin2sa(&sin), &sinlen);
+	if (rv == -1) {
+		switch (errno) {
+		case EINTR:
+		case EAGAIN:
+			break;
+		default:
+			lwarn("%s discard recv", gi->gi_name);
+			break;
+		}
+		return;
+	}
 
-	return (~cksum);
+	iface->if_discards++;
+
+	ds = dhcp_validate(iface, gi, buf, rv, &sin, sinlen);
+	if (ds == NULL)
+		return;
+
+	if (verbose) {
+		const struct dhcp_packet *packet =
+		    (const struct dhcp_packet *)buf;
+
+		linfo("discarding BOOTREPLY for " ETHER_FMT " xid %08x on %s"
+		    " from %s to %s", ETHER_ARGS(packet->chaddr),
+		    ntohl(packet->xid), iface->if_name,
+		    ds->ds_name, gi->gi_name);
+	}
 }
 
 void
@@ -1208,107 +1244,57 @@ srvr_input(int fd, short events, void *arg)
 {
 	struct dhcp_giaddr *gi = arg;
 	struct iface *iface = gi->gi_if;
-	uint8_t buf[4096];
-	struct dhcp_packet *packet = (struct dhcp_packet *)buf;
+	struct dhcp_reply *dr;
+	struct dhcp_packet *packet;
 	struct sockaddr_in sin;
-	struct dhcp_server *ds;
 	socklen_t sinlen = sizeof(sin);
-	ssize_t len;
+	struct dhcp_server *ds;
+	ssize_t rv;
+	unsigned int diff, head;
 
-	len = recvfrom(fd, buf, sizeof(buf), 0, sin2sa(&sin), &sinlen);
-	if (len == -1) {
+	head = iface->if_replies_head;
+	diff = head - iface->if_replies_tail;
+	if (diff >= nitems(iface->if_replies)) {
+		srvr_discard(fd, iface, gi);
+		return;
+	}
+
+	dr = &iface->if_replies[head++ & IFACE_REPLY_RING_MASK];
+
+	rv = recvfrom(fd, dr->dr_buf, sizeof(dr->dr_buf), 0,
+	    sin2sa(&sin), &sinlen);
+	if (rv == -1) {
 		switch (errno) {
 		case EAGAIN:
 		case EINTR:
 			break;
 		default:
-			lerr(1, "udp recv");
+			lerr(1, "%s udp recv", gi->gi_name);
 			/* NOTREACHED */
 		}
 		return;
 	}
+	dr->dr_len = rv;
 
-	if (len < BOOTP_MIN_LEN) {
-		ldebug("%s: short packet", __func__);
+	ds = dhcp_validate(iface, gi, dr->dr_buf, dr->dr_len, &sin, sinlen);
+	if (ds == NULL)
 		return;
-	}
-	if (sinlen < sizeof(sin)) {
-		ldebug("%s: short address", __func__);
-		return;
-	}
 
-	if (packet->op != BOOTREPLY) {
-		iface->if_srvr_op++;
-		return;
-	}
+	dr->dr_gi = gi;
+	dr->dr_ds = ds;
 
-	if (packet->giaddr.s_addr != gi->gi_sin.sin_addr.s_addr) {
-		/* Filter packet that is not meant for us */
-		iface->if_srvr_giaddr++;
+	packet = (struct dhcp_packet *)dr->dr_buf;
+	if (packet->ciaddr.s_addr == htonl(0) &&
+	    packet->yiaddr.s_addr == htonl(0)) {
+		/* we can't inject arp for this */
+		(*iface->if_srvr_relay)(iface, dr->dr_gi, dr->dr_ds->ds_name,
+		    packet, dr->dr_len);
 		return;
 	}
 
-	if (packet->hlen != ETHER_ADDR_LEN) {
-		/* nope */
-		iface->if_dhcp_hlen++;
+	if (lladdr_add(iface, dr) == -1)
 		return;
-	}
-
-	if (iface->if_nakfilt) {
-		uint8_t mlen;
-		uint8_t *opts = (uint8_t *)(packet + 1);
-		ssize_t olen = dhcp_opt_end(opts, len - sizeof(*packet),
-		    DHO_DHCP_MESSAGE_TYPE);
-		if (olen == -1) {
-			/* too short or missing opts */
-			iface->if_dhcp_len++;
-			return;
-		}
-
-		olen++; /* move to the len */
-		if (olen >= len) {
-			/* too short */
-			iface->if_dhcp_len++;
-			return;
-		}
-
-		mlen = opts[olen];
-		if (mlen != 1) {
-			/* unknown message length */
-			iface->if_dhcp_len++;
-			return;
-		}
-
-		olen++; /* move to the value */
-		if (olen >= len) {
-			/* too short */
-			iface->if_dhcp_len++;
-			return;
-		}
-
-		if (opts[olen] == DHCPNAK) {
-			/* filter */
-			iface->if_dhcp_nakfilt++;
-			return;
-		}
-	}
-
-	ds = bsearch(&sin, iface->if_servers, iface->if_nservers,
-	    sizeof(*iface->if_servers), iface_cmp);
-	if (ds == NULL) {
-		iface->if_srvr_unknown++;
-		return;
-	}
-
-	if (memcmp(packet->cookie, DHCP_OPTIONS_COOKIE,
-	    sizeof(packet->cookie)) != 0) {
-		ldebug("%s: not DHCP?", __func__);
-		/* old school BOOTP? */
-		srvr_relay(iface, gi, ds->ds_name, packet, len);
-		return;
-	}
-
-	(*iface->if_srvr_relay)(iface, gi, ds->ds_name, packet, len);
+	iface->if_replies_head = head;
 }
 
 void
@@ -1360,17 +1346,21 @@ void
 srvr_relay(struct iface *iface, struct dhcp_giaddr *gi,
     const char *srvr_name, struct dhcp_packet *packet, size_t len)
 {
-	struct ether_header eh;
-	struct {
-		struct ip ip;
-		struct udphdr udp;
-	} l3h;
-	struct ip *iph = &l3h.ip;
-	struct udphdr *udph = &l3h.udp;
-	struct iovec iov[3];
-	uint32_t cksum;
-	uint16_t udplen = sizeof(*udph) + len;
+	struct sockaddr_in sin = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_BROADCAST),
+		.sin_port = htons(CLIENT_PORT),
+	};
 	ssize_t rv;
+
+	if (!ISSET(packet->flags, htons(BOOTP_BROADCAST))) {
+		if (packet->ciaddr.s_addr != htonl(0))
+			sin.sin_addr = packet->ciaddr;
+		else if (packet->yiaddr.s_addr != htonl(0))
+			sin.sin_addr = packet->yiaddr;
+		else
+			sin.sin_addr = gi->gi_broadcast.sin_addr;
+	}
 
 	/*
 	 * VMware PXE "ROMs" confuse the DHCP gateway address
@@ -1383,62 +1373,13 @@ srvr_relay(struct iface *iface, struct dhcp_giaddr *gi,
 	 */
 	packet->giaddr.s_addr = htonl(0);
 
-	if (packet->flags & htons(BOOTP_BROADCAST)) {
-		memset(eh.ether_dhost, 0xff, sizeof(eh.ether_dhost));
-		iph->ip_dst.s_addr = htonl(INADDR_BROADCAST);
-	} else {
-		/*
-		 * We could unicast using sendto() with the giaddr socket,
-		 * but the client may not have an ARP entry yet. Use BPF
-		 * to send it because all the information is already here.
-		 */
-		memcpy(eh.ether_dhost, packet->chaddr, sizeof(eh.ether_dhost));
-		iph->ip_dst = (packet->ciaddr.s_addr != htonl(0)) ?
-		    packet->ciaddr : packet->yiaddr;
-	}
-
-	memcpy(eh.ether_shost, iface->if_hwaddr, sizeof(eh.ether_shost));
-	eh.ether_type = htons(ETHERTYPE_IP);
-
-	iph->ip_v = 4;
-	iph->ip_hl = sizeof(*iph) >> 2;
-	iph->ip_tos = IPTOS_LOWDELAY;
-	iph->ip_len = htons(sizeof(l3h) + len);
-	iph->ip_id = 0;
-	iph->ip_off = 0;
-	iph->ip_ttl = 16;
-	iph->ip_p = IPPROTO_UDP;
-	iph->ip_sum = htons(0);
-	iph->ip_src = gi->gi_sin.sin_addr;
-
-	iph->ip_sum = cksum(iph, sizeof(*iph));
-
-	udph->uh_sport = htons(SERVER_PORT);
-	udph->uh_dport = htons(CLIENT_PORT);
-	udph->uh_ulen = htons(udplen);
-	udph->uh_sum = htons(0);
-
-	cksum = cksum_add(&iph->ip_src,
-	    sizeof(iph->ip_src) + sizeof(iph->ip_dst), 0);
-	cksum = cksum_word(IPPROTO_UDP, cksum);
-	cksum = cksum_word(udplen, cksum);
-	cksum = cksum_add(udph, sizeof(*udph), cksum);
-	cksum = cksum_add(packet, len, cksum);
-
-	udph->uh_sum = cksum_fini(cksum);
-
-	iov[0].iov_base = &eh;
-	iov[0].iov_len = sizeof(eh);
-	iov[1].iov_base = &l3h;
-	iov[1].iov_len = sizeof(l3h);
-	iov[2].iov_base = packet;
-	iov[2].iov_len = len;
-
-	rv = writev(EVENT_FD(&iface->if_bpf_ev), iov, nitems(iov));
+	rv = sendto(EVENT_FD(&gi->gi_ev), packet, len, 0,
+	    sin2sa(&sin), sizeof(sin));
 	if (rv == -1) {
 		switch (errno) {
 		case EAGAIN:
 		case EINTR:
+			return;
 
 		case ENOMEM:
 		case ENOBUFS:
@@ -1450,8 +1391,9 @@ srvr_relay(struct iface *iface, struct dhcp_giaddr *gi,
 			break;
 
 		default:
-			lerr(1, "%s bpf write", iface->if_name);
-			/* NOTREACHED */
+			lwarn("%s %s sendto %s", iface->if_name, gi->gi_name,
+			    inet_ntoa(sin.sin_addr));
+			break;
 		}
 
 		/* oh well */
@@ -1460,10 +1402,291 @@ srvr_relay(struct iface *iface, struct dhcp_giaddr *gi,
 
 	if (verbose) {
 		linfo("forwarded BOOTREPLY for " ETHER_FMT " xid %08x on %s"
-		    " from %s to %s", ETHER_ARGS(packet->chaddr),
+		    " from %s to %s to %s", ETHER_ARGS(packet->chaddr),
 		    ntohl(packet->xid), iface->if_name, srvr_name,
-		    gi->gi_name);
+		    gi->gi_name, inet_ntoa(sin.sin_addr));
 	}
+}
+
+static void
+lladdr_reply(int fd, short events, void *arg)
+{
+	struct rt_msghdr rtm;
+	struct iface *iface = arg;
+	struct dhcp_reply *dr;
+	unsigned int tail;
+	ssize_t rv;
+	size_t len;
+	//unsigned int seq;
+
+	rv = recv(fd, &rtm, sizeof(rtm), 0);
+	if (rv == -1) {
+		switch (errno) {
+		case EAGAIN:
+		case EINTR:
+			break;
+		default:
+			lwarn("lladdr helper reply");
+			break;
+		}
+
+		return;
+	}
+	len = rv;
+	if (len == 0)
+		lerrx(1, "lladdr helper has gone");
+	if (len < sizeof(rtm))
+		lerrx(1, "lladdr helper: short reply");
+
+	tail = iface->if_replies_tail;
+	if (iface->if_replies_head == tail)
+		lerrx(1, "unexpected lladdr reply");
+
+	//seq = rtm.rtm_seq;
+
+	dr = &iface->if_replies[tail++ & IFACE_REPLY_RING_MASK];
+
+	if (rtm.rtm_errno != 0) {
+		lwarnc(rtm.rtm_errno, "%s", __func__);
+	} else {
+		(*iface->if_srvr_relay)(iface, dr->dr_gi, dr->dr_ds->ds_name,
+		    (struct dhcp_packet *)dr->dr_buf, dr->dr_len);
+	}
+
+	iface->if_replies_tail = tail;
+}
+
+#define RTMSG_SPACE(_s) roundup(_s, sizeof(long))
+#define RTMSG_NEXT(_s) (void *)((uint8_t *)(_s) + RTMSG_SPACE(sizeof(*_s)))
+
+static int
+lladdr_add(struct iface *iface, struct dhcp_reply *dr)
+{
+	const struct dhcp_packet *packet =
+	    (const struct dhcp_packet *)dr->dr_buf;
+	ssize_t rv;
+
+	struct rt_msghdr *rtm;
+	struct sockaddr_in *sin;
+	struct sockaddr_dl *sdl;
+
+	uint8_t rtmsg[RTMSG_SPACE(sizeof(*rtm)) +
+	    RTMSG_SPACE(sizeof(*sin)) + /* RTA_DST */
+	    RTMSG_SPACE(sizeof(*sdl)) + /* RTA_GATEWAY */
+	    RTMSG_SPACE(sizeof(*sin)) + /* RTA_NETMASK */
+	    RTMSG_SPACE(sizeof(*sdl)) + /* RTA_IFP */
+	    RTMSG_SPACE(sizeof(*sin))]; /* RTA_IFA */
+
+	memset(rtmsg, 0, sizeof(rtmsg));
+
+	rtm = (struct rt_msghdr *)rtmsg;
+	rtm->rtm_msglen = sizeof(rtmsg);
+	rtm->rtm_version = RTM_VERSION;
+	rtm->rtm_type = RTM_ADD;
+	rtm->rtm_hdrlen = sizeof(*rtm);
+	rtm->rtm_index = iface->if_index;
+	rtm->rtm_tableid = iface->if_rdomain;
+	rtm->rtm_priority = RTP_CONNECTED - 1; /* XXX */
+	rtm->rtm_flags = RTF_UP | RTF_HOST | RTF_LLINFO;
+	rtm->rtm_addrs =
+	    RTA_DST | RTA_GATEWAY | RTA_NETMASK | RTA_IFP | RTA_IFA;
+	rtm->rtm_seq = ++iface->if_rtseq;
+
+	rtm->rtm_inits = RTV_EXPIRE;
+	rtm->rtm_rmx.rmx_expire = time(NULL) + 1200;
+
+	/* DST */
+	sin = RTMSG_NEXT(rtm);
+	sin->sin_len = sizeof(*sin);
+	sin->sin_family = AF_INET;
+	sin->sin_addr = (packet->ciaddr.s_addr != htonl(0)) ?
+	    packet->ciaddr : packet->yiaddr;
+
+	/* GATEWAY */
+	sdl = RTMSG_NEXT(sin);
+	sdl->sdl_len = sizeof(*sdl);
+	sdl->sdl_family = AF_LINK;
+	sdl->sdl_alen = packet->hlen;
+	memcpy(LLADDR(sdl), packet->chaddr, sdl->sdl_alen);
+
+	/* NETMASK */
+	sin = RTMSG_NEXT(sdl);
+	sin->sin_len = sizeof(*sin);
+	sin->sin_family = AF_INET;
+	sin->sin_addr.s_addr = htonl(0xffffffff);
+
+	/* IFP */
+	sdl = RTMSG_NEXT(sin);
+	sdl->sdl_len = sizeof(*sdl);
+	sdl->sdl_family = AF_LINK;
+	sdl->sdl_index = iface->if_index;
+	sdl->sdl_type = IFT_ETHER;
+	sdl->sdl_nlen = strlen(iface->if_name);
+	memcpy(sdl->sdl_data, iface->if_name, sdl->sdl_nlen);
+	sdl->sdl_alen = iface->if_hwaddrlen;
+	memcpy(LLADDR(sdl), iface->if_hwaddr, sdl->sdl_alen);
+
+	/* IFA */
+	sin = RTMSG_NEXT(sdl);
+	*sin = dr->dr_gi->gi_addr;
+	sin->sin_len = sizeof(*sin);
+
+	rv = send(EVENT_FD(&iface->if_llh_ev), rtmsg, sizeof(rtmsg), 0);
+	if (rv == -1) {
+		lwarn("lladdr helper send");
+		return (-1);
+	}
+
+	return (0);
+}
+
+static void
+lladdr_rtmsg(int fd, int rtsock)
+{
+	char rtmsg[1024]; /* XXX magic */
+	struct rt_msghdr *rtm = (struct rt_msghdr *)rtmsg;
+	ssize_t rv;
+	size_t len;
+	//unsigned int seq;
+
+	rv = recv(fd, rtmsg, sizeof(rtmsg), 0);
+	if (rv == -1) {
+		switch (errno) {
+		case EINTR:
+		case EAGAIN:
+			break;
+		default:
+			lwarn("lladdr helper request");
+		}
+		return;
+	}
+	len = rv;
+
+	if (rtm->rtm_version != RTM_VERSION)
+		lerrx(1, "lladdr helper: request rtm_version invalid");
+	if (rtm->rtm_type != RTM_ADD)
+		lerrx(1, "lladdr helper: request rtm_type invalid");
+	if (rtm->rtm_hdrlen != sizeof(*rtm))
+		lerrx(1, "lladdr helper: request rtm_hdrlen invalid");
+	if (rtm->rtm_msglen >= sizeof(rtmsg))
+		lerrx(1, "lladdr helper: request rtm_msglen is too long");
+	if (rtm->rtm_msglen != len)
+               lerrx(1, "lladdr helper: request rtm_msglen is wrong");
+	if (rtm->rtm_flags &
+	    ~(RTF_UP | RTF_HOST | RTF_LLINFO | RTF_STATIC | RTF_MPATH)) {
+		lerrx(1,
+		    "lladdr helper: request rtm_flags has unexpected bits");
+	}
+	if (rtm->rtm_addrs &
+	    ~(RTA_DST | RTA_GATEWAY | RTA_NETMASK | RTA_IFP | RTA_IFA)) {
+		lerrx(1,
+		    "lladdr helper: request rtm_addrs has unexpected bits");
+	}
+	if (rtm->rtm_inits & ~(RTV_EXPIRE)) {
+		lerrx(1,
+		    "lladdr helper: request rtm_inits has unexpected bits");
+	}
+
+	/* XXX check more? */
+
+	//seq = rtm->rtm_seq;
+
+	rtm->rtm_errno = 0;
+	rv = send(rtsock, rtmsg, len, 0);
+	if (rv == -1) {
+		/* handle if there's an existing LLFINO entry */
+		if (errno == EEXIST) {
+			rtm->rtm_type = RTM_CHANGE;
+			/* We want this flag clear if the kernel has it set. */
+			rtm->rtm_fmask = RTF_REJECT;
+
+			rv = send(rtsock, rtmsg, len, 0);
+			if (rv == -1)
+				rtm->rtm_errno = errno;
+		} else
+			rtm->rtm_errno = errno;
+	}
+
+	/* Report back to the main process what happened */
+	rv = send(fd, rtm, sizeof(*rtm), 0);
+	if (rv == -1)
+		lerr(1, "lladdr helper: unable to reply");
+}
+
+static void
+lladdr_closefrom(struct iface *iface)
+{
+	size_t i;
+
+	close(iface->if_bcast_ev.ev_fd);
+
+	for (i = 0; i < iface->if_ngiaddrs; i++) {
+		struct dhcp_giaddr *gi = &iface->if_giaddrs[i];
+		close(gi->gi_ev.ev_fd);
+	}
+}
+
+static int
+lladdr_helper(struct iface *iface, int devnull)
+{
+	int llhpair[2];
+	int rtsock;
+
+	if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK, 0,
+	    llhpair) == -1)
+		err(1, "lladdr handler socketpair");
+
+	switch (fork()) {
+	case -1:
+		err(1, "lladdr handler fork");
+		/* NOTREACHED */
+
+	case 0: /* child */
+		break;
+
+	default: /* parent */
+		close(llhpair[0]);
+		return (llhpair[1]);
+	}
+
+	setproctitle("%s %s", iface->if_name, LLADDR_HELPER_PROCTITLE);
+	close(llhpair[1]);
+	lladdr_closefrom(iface);
+
+	rtsock = socket(AF_ROUTE, SOCK_RAW, 0); /* we can block on rtsock */
+	if (rtsock == -1)
+		err(1, "route socket");
+
+	/* no filesystem visibility */
+	if (unveil("/", "") == -1)
+		err(1, "lladdr helper unveil");
+	if (unveil(NULL, NULL) == -1)
+		err(1, "router helper unveil fini");
+
+	if (devnull != -1 && rdaemon(devnull) == -1)
+		err(1, "lladdr helper unable to daemonize");
+
+	for (;;) {
+		struct pollfd pfd[] = {
+			{ .fd = llhpair[0], .events = POLLIN },
+		};
+		int nfds = poll(pfd, nitems(pfd), -1);
+		if (nfds == -1) {
+			if (errno != EINTR)
+				lwarn("poll");
+			continue;
+		}
+		if (nfds == 0)
+			continue;
+
+		if (pfd[0].revents & POLLHUP)
+			lerrx(1, "lladdr helper: ipc socket closed");
+
+		if (pfd[0].revents & POLLIN)
+			lladdr_rtmsg(llhpair[0], rtsock);
+	}
+
+	exit(1);
 }
 
 /* daemon(3) clone, intended to be used in a "r"estricted environment */
