@@ -610,7 +610,8 @@ iface_get(const char *ifname)
 		case AF_LINK:
 			ifi = (struct if_data *)ifa->ifa_data;
 
-			if (ifi->ifi_type != IFT_ETHER)
+			if (ifi->ifi_type != IFT_ETHER &&
+			    ifi->ifi_type != IFT_CARP)
 				break;
 
 			sdl = (struct sockaddr_dl *)ifa->ifa_addr;
